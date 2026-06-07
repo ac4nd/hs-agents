@@ -1,0 +1,145 @@
+package com.hypersense.boot.system.controller;
+
+import com.baomidou.mybatisplus.core.metadata.IPage;
+import com.hypersense.boot.common.annotation.Log;
+import com.hypersense.boot.common.enums.ActionTypeEnum;
+import com.hypersense.boot.common.enums.LogModuleEnum;
+import com.hypersense.boot.common.result.PageResult;
+import com.hypersense.boot.common.result.Result;
+import com.hypersense.boot.system.model.form.NoticeForm;
+import com.hypersense.boot.system.model.query.NoticeQuery;
+import com.hypersense.boot.system.model.vo.NoticeDetailVO;
+import com.hypersense.boot.system.model.vo.NoticePageVO;
+import com.hypersense.boot.system.model.vo.UserNoticePageVO;
+import com.hypersense.boot.system.service.NoticeService;
+import com.hypersense.boot.system.service.UserNoticeService;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
+import jakarta.validation.Valid;
+import lombok.RequiredArgsConstructor;
+import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+/**
+ * 通知公告前端控制层
+ *
+ * @author youlaitech
+ * @since 2024-08-27 10:31
+ */
+@Tag(name = "08.通知公告")
+@RestController
+@RequestMapping("/api/v1/notices")
+@RequiredArgsConstructor
+public class NoticeController {
+
+    private final NoticeService noticeService;
+
+    private final UserNoticeService userNoticeService;
+
+    @Operation(summary = "通知公告分页列表")
+    @GetMapping
+    @PreAuthorize("@ss.hasPerm('sys:notice:list')")
+    @Log(module = LogModuleEnum.NOTICE, value = ActionTypeEnum.LIST)
+    public PageResult<NoticePageVO> getNoticePage(NoticeQuery queryParams) {
+        IPage<NoticePageVO> result = noticeService.getNoticePage(queryParams);
+        return PageResult.success(result);
+    }
+
+    @Operation(summary = "新增通知公告")
+    @PostMapping
+    @PreAuthorize("@ss.hasPerm('sys:notice:create')")
+    @Log(module = LogModuleEnum.NOTICE, value = ActionTypeEnum.INSERT)
+    public Result<?> saveNotice(@RequestBody @Valid NoticeForm formData) {
+        boolean result = noticeService.saveNotice(formData);
+        return Result.judge(result);
+    }
+
+    @Operation(summary = "获取通知公告表单数据")
+    @GetMapping("/{id}/form")
+    @PreAuthorize("@ss.hasPerm('sys:notice:update')")
+    public Result<NoticeForm> getNoticeForm(
+            @Parameter(description = "通知公告ID") @PathVariable Long id
+    ) {
+        NoticeForm formData = noticeService.getNoticeFormData(id);
+        return Result.success(formData);
+    }
+
+    @Operation(summary = "阅读获取通知公告详情")
+    @GetMapping("/{id}/detail")
+    public Result<NoticeDetailVO> getNoticeDetail(
+            @Parameter(description = "通知公告ID") @PathVariable Long id
+    ) {
+        NoticeDetailVO detailVo = noticeService.getNoticeDetail(id);
+        return Result.success(detailVo);
+    }
+
+    @Operation(summary = "修改通知公告")
+    @PutMapping(value = "/{id}")
+    @PreAuthorize("@ss.hasPerm('sys:notice:update')")
+    @Log(module = LogModuleEnum.NOTICE, value = ActionTypeEnum.UPDATE)
+    public Result<Void> updateNotice(
+            @Parameter(description = "通知公告ID") @PathVariable Long id,
+            @RequestBody @Validated NoticeForm formData
+    ) {
+        boolean result = noticeService.updateNotice(id, formData);
+        return Result.judge(result);
+    }
+
+    @Operation(summary = "发布通知公告")
+    @PutMapping("/{id}/publish")
+    @PreAuthorize("@ss.hasPerm('sys:notice:publish')")
+    @Log(module = LogModuleEnum.NOTICE, value = ActionTypeEnum.UPDATE)
+    public Result<Void> publishNotice(
+            @Parameter(description = "通知公告ID") @PathVariable Long id
+    ) {
+        boolean result = noticeService.publishNotice(id);
+        return Result.judge(result);
+    }
+
+    @Operation(summary = "撤回通知公告")
+    @PutMapping("/{id}/revoke")
+    @PreAuthorize("@ss.hasPerm('sys:notice:revoke')")
+    @Log(module = LogModuleEnum.NOTICE, value = ActionTypeEnum.UPDATE)
+    public Result<Void> revokeNotice(
+            @Parameter(description = "通知公告ID") @PathVariable Long id
+    ) {
+        boolean result = noticeService.revokeNotice(id);
+        return Result.judge(result);
+    }
+
+    @Operation(summary = "删除通知公告")
+    @DeleteMapping("/{ids}")
+    @PreAuthorize("@ss.hasPerm('sys:notice:delete')")
+    @Log(module = LogModuleEnum.NOTICE, value = ActionTypeEnum.DELETE)
+    public Result<Void> deleteNotices(
+            @Parameter(description = "通知公告ID，多个以英文逗号(,)分割") @PathVariable String ids
+    ) {
+        boolean result = noticeService.deleteNotices(ids);
+        return Result.judge(result);
+    }
+
+    @Operation(summary = "全部已读")
+    @PutMapping("/read-all")
+    public Result<Void> readAll() {
+        userNoticeService.readAll();
+        return Result.success();
+    }
+
+    @Operation(summary = "获取我的通知公告分页列表")
+    @GetMapping("/my")
+    public PageResult<UserNoticePageVO> getMyNoticePage(
+            NoticeQuery queryParams
+    ) {
+        IPage<UserNoticePageVO> result = noticeService.getMyNoticePage(queryParams);
+        return PageResult.success(result);
+    }
+}

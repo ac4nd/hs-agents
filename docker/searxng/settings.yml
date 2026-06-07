@@ -1,0 +1,63 @@
+# SearXNG 配置
+# 文档：https://docs.searxng.org/admin/settings/settings.html
+
+use_default_settings: true
+
+general:
+  instance_name: "GodlikeAgents SearXNG"
+  debug: false
+
+search:
+  # 安全搜索模式（0=关闭，1=中等，2=严格）
+  safe_search: 0
+  # 默认语言（auto=自动检测，zh-CN=简体中文）
+  default_lang: "auto"
+  # 搜索结果格式
+  formats:
+    - html
+    - json
+
+server:
+  # 监听端口（容器内部）
+  port: 8080
+  bind_address: "0.0.0.0"
+  secret_key: "godlikeagents-searxng-secret-key"
+  # 限制每分钟最大请求数（0=不限制）
+  limiter: false
+  # 公开实例（false=仅允许本地访问）
+  public_instance: false
+
+ui:
+  static_use_hash: true
+
+# 启用的搜索引擎（默认全部启用，这里列出常用引擎）
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+    disabled: false
+
+  - name: bing
+    engine: bing
+    shortcut: b
+    disabled: false
+
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    disabled: false
+
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    disabled: false
+
+  - name: github
+    engine: github
+    shortcut: gh
+    disabled: false
+
+  - name: stackoverflow
+    engine: stackoverflow
+    shortcut: st
+    disabled: false

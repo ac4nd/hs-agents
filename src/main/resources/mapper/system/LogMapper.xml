@@ -1,0 +1,121 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--suppress ALL -->
+<mapper namespace="com.hypersense.boot.system.mapper.LogMapper">
+
+    <!-- 日志分页列表 -->
+    <select id="getLogPage" resultType="com.hypersense.boot.system.model.vo.LogPageVO">
+        SELECT
+            t1.id,
+            t1.module,
+            t1.action_type AS actionType,
+            t1.title,
+            t1.content,
+            t1.operator_id AS operatorId,
+            t1.operator_name AS operatorName,
+            t1.request_uri AS requestUri,
+            t1.request_method AS requestMethod,
+            t1.ip,
+            CONCAT(t1.province, ' ', t1.city) AS region,
+            t1.device,
+            t1.os,
+            t1.browser,
+            t1.status,
+            t1.execution_time AS executionTime,
+            t1.error_msg AS errorMsg,
+            t1.create_time AS createTime
+        FROM
+            sys_log t1
+        <where>
+            <if test="queryParams.keywords != null and queryParams.keywords != ''">
+                AND (
+                    t1.title LIKE '%' || #{queryParams.keywords} || '%'
+                    OR
+                    t1.content LIKE '%' || #{queryParams.keywords} || '%'
+                    OR
+                    t1.ip LIKE '%' || #{queryParams.keywords} || '%'
+                    OR
+                    t1.operator_name LIKE '%' || #{queryParams.keywords} || '%'
+                )
+            </if>
+            <if test="queryParams.createTime != null and queryParams.createTime.size > 0">
+                <if test="queryParams.createTime[0] != null and queryParams.createTime[0] != ''">
+                    <bind name="startDate" value="queryParams.createTime[0].length() == 10 ? queryParams.createTime[0] + ' 00:00:00' : queryParams.createTime[0]"/>
+                    AND t1.create_time &gt;= #{startDate}
+                </if>
+                <if test="queryParams.createTime[1] != null and queryParams.createTime[1] != ''">
+                    <bind name="endDate" value="queryParams.createTime[1].length() == 10 ? queryParams.createTime[1] + ' 23:59:59' : queryParams.createTime[1]"/>
+                    AND t1.create_time &lt;= #{endDate}
+                </if>
+            </if>
+        </where>
+        ORDER BY
+            t1.create_time DESC
+    </select>
+
+    <!-- 获取访问量日统计列表  -->
+    <select id="getPvCounts" resultType="com.hypersense.boot.system.model.dto.VisitCountDTO">
+        SELECT
+            COUNT(1) AS count,
+            TO_CHAR(create_time, 'YYYY-MM-DD') AS date
+        FROM
+            sys_log
+        WHERE
+            create_time BETWEEN #{startDate} AND #{endDate}
+        GROUP BY
+            TO_CHAR(create_time, 'YYYY-MM-DD')
+    </select>
+
+    <!-- 获取IP日统计列表-->
+    <select id="getIpCounts" resultType="com.hypersense.boot.system.model.dto.VisitCountDTO">
+        SELECT
+            COUNT(DISTINCT ip) AS count,
+            TO_CHAR(create_time, 'YYYY-MM-DD') AS date
+        FROM
+            sys_log
+        WHERE
+            create_time BETWEEN #{startDate} AND #{endDate}
+        GROUP BY
+            TO_CHAR(create_time, 'YYYY-MM-DD')
+    </select>
+
+    <!-- 获取访问量(PV)统计数据 -->
+    <select id="getPvStats" resultType="com.hypersense.boot.system.model.vo.VisitOverviewVO">
+        SELECT
+            COUNT(CASE WHEN DATE(create_time) = CURRENT_DATE THEN 1 END) AS todayPvCount,
+            COUNT(*) AS totalPvCount,
+            ROUND(
+                    CASE
+                        WHEN COUNT(CASE WHEN DATE(create_time) = CURRENT_DATE - INTERVAL '1 day' AND CAST(create_time AS TIME) &lt;= LOCALTIME THEN 1 END) = 0 THEN 0
+                        ELSE
+                            (COUNT(CASE WHEN DATE(create_time) = CURRENT_DATE THEN 1 END) -
+                             COUNT(CASE WHEN DATE(create_time) = CURRENT_DATE - INTERVAL '1 day' AND CAST(create_time AS TIME)  &lt;= LOCALTIME THEN 1 END)) /
+                            COUNT(CASE WHEN DATE(create_time) = CURRENT_DATE - INTERVAL '1 day' AND CAST(create_time AS TIME)  &lt;= LOCALTIME THEN 1 END)
+                        END,
+                    2) AS pvGrowthRate
+        FROM
+            sys_log
+    </select>
+
+    <!-- 获取IP统计数据 -->
+    <select id="getUvStats" resultType="com.hypersense.boot.system.model.vo.VisitOverviewVO">
+            SELECT
+                COUNT(DISTINCT CASE WHEN DATE(create_time) = CURRENT_DATE THEN ip END) AS todayUvCount,
+                COUNT(DISTINCT ip) AS totalUvCount,
+                ROUND(
+                    CASE
+                        WHEN COUNT(DISTINCT CASE WHEN DATE(create_time) = CURRENT_DATE - INTERVAL '1 day' AND CAST(create_time AS TIME) &lt;= LOCALTIME THEN ip END) = 0 THEN 0
+                    ELSE
+                        (COUNT(DISTINCT CASE WHEN DATE(create_time) = CURRENT_DATE THEN ip END) -
+                        COUNT(DISTINCT CASE WHEN DATE(create_time) = CURRENT_DATE - INTERVAL '1 day' AND CAST(create_time AS TIME) &lt;= LOCALTIME THEN ip END)) /
+                        COUNT(DISTINCT CASE WHEN DATE(create_time) = CURRENT_DATE - INTERVAL '1 day' AND CAST(create_time AS TIME) &lt;= LOCALTIME THEN ip END)
+                    END,
+                2) AS uvGrowthRate
+            FROM
+                sys_log
+    </select>
+
+
+</mapper>

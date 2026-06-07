@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--suppress ALL -->
+<mapper namespace="com.hypersense.boot.codegen.mapper.DatabaseMapper">
+
+    <!-- 查询数据库表分页(PostgreSQL) -->
+    <select id="getTablePage" resultType="com.hypersense.boot.codegen.model.vo.TablePageVO">
+        SELECT
+            t1.TABLE_NAME,
+            obj_description((quote_ident(t1.table_schema) || '.' || quote_ident(t1.table_name))::regclass, 'pg_class') AS TABLE_COMMENT,
+            NULL AS TABLE_COLLATION,
+            NULL AS ENGINE,
+            NULL AS CREATE_TIME,
+            CASE WHEN t2.id IS NOT NULL THEN 1 ELSE 0 END AS isConfigured
+        FROM
+            information_schema.tables t1
+            LEFT JOIN gen_table t2 ON t1.TABLE_NAME = t2.table_name
+        WHERE
+            t1.TABLE_SCHEMA = CURRENT_SCHEMA()
+            AND t1.table_type = 'BASE TABLE'
+            <if test="queryParams.keywords != null and queryParams.keywords.trim() neq ''">
+                AND t1.TABLE_NAME LIKE '%' || #{queryParams.keywords} || '%'
+            </if>
+        <!-- 排除的表 -->
+        <if test="queryParams.excludeTables != null and queryParams.excludeTables.size() > 0">
+            AND t1.TABLE_NAME NOT IN
+            <foreach collection="queryParams.excludeTables" item="excludeTable" open="(" close=")" separator=",">
+                #{excludeTable}
+            </foreach>
+        </if>
+        ORDER BY
+            t1.TABLE_NAME
+    </select>
+
+    <!-- 查询数据库表元数据(PostgreSQL) -->
+    <select id="getTableMetadata" resultType="com.hypersense.boot.codegen.model.vo.TableMetaVO">
+        SELECT
+            TABLE_NAME,
+            obj_description((quote_ident(table_schema) || '.' || quote_ident(table_name))::regclass, 'pg_class') AS TABLE_COMMENT,
+            NULL AS TABLE_COLLATION,
+            NULL AS ENGINE,
+            NULL AS CREATE_TIME
+        FROM
+            information_schema.tables
+        WHERE
+            TABLE_SCHEMA = CURRENT_SCHEMA()
+          AND TABLE_NAME = #{tableName}
+    </select>
+
+    <!-- 获取数据库表字段元数据(PostgreSQL) -->
+    <select id="getTableColumns" resultType="com.hypersense.boot.codegen.model.vo.ColumnMetaVO">
+        SELECT
+            c.COLUMN_NAME,
+            c.DATA_TYPE,
+            col_description((quote_ident(c.table_schema) || '.' || quote_ident(c.table_name))::regclass, c.ORDINAL_POSITION) AS COLUMN_COMMENT,
+            CASE WHEN pk.COLUMN_NAME IS NOT NULL THEN 1 ELSE 0 END AS isPrimaryKey,
+            c.IS_NULLABLE,
+            c.CHARACTER_MAXIMUM_LENGTH,
+            NULL AS CHARACTER_SET_NAME,
+            c.COLLATION_NAME
+        FROM
+            information_schema.columns c
+            LEFT JOIN (
+                SELECT kcu.TABLE_SCHEMA, kcu.TABLE_NAME, kcu.COLUMN_NAME
+                FROM information_schema.table_constraints tc
+                JOIN information_schema.key_column_usage kcu
+                    ON tc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                    AND tc.TABLE_SCHEMA = kcu.TABLE_SCHEMA
+                    AND tc.TABLE_NAME = kcu.TABLE_NAME
+                WHERE tc.CONSTRAINT_TYPE = 'PRIMARY KEY'
+                    AND tc.TABLE_SCHEMA = CURRENT_SCHEMA()
+            ) pk ON c.TABLE_SCHEMA = pk.TABLE_SCHEMA
+                AND c.TABLE_NAME = pk.TABLE_NAME
+                AND c.COLUMN_NAME = pk.COLUMN_NAME
+        WHERE
+            c.TABLE_SCHEMA = CURRENT_SCHEMA()
+            AND c.TABLE_NAME = #{tableName}
+        ORDER BY c.ORDINAL_POSITION ASC
+    </select>
+
+</mapper>

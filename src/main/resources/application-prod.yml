@@ -1,0 +1,263 @@
+server:
+  port: 8989
+
+spring:
+  datasource:
+    type: com.alibaba.druid.pool.DruidDataSource
+    # === PostgreSQL 数据源 ===
+    driver-class-name: org.postgresql.Driver
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:godlikeagents}?currentSchema=public&stringtype=unspecified
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    druid:
+      initial-size: 5
+      min-idle: 5
+      max-active: 20
+      test-on-borrow: false
+      test-while-idle: true
+      time-between-eviction-runs-millis: 60000
+      min-evictable-idle-time-millis: 300000
+      validation-query: SELECT 1
+      pool-prepared-statements: true
+      max-pool-prepared-statement-per-connection-size: 20
+      filters: stat,wall,log4j
+      connection-init-sqls:
+        - SET search_path TO public
+
+  data:
+    redis:
+      database: ${REDIS_DATABASE:0}
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      timeout: 10s
+      lettuce:
+        pool:
+          max-active: 8
+          max-wait: -1
+          max-idle: 8
+          min-idle: 0
+  cache:
+    enabled: false
+    type: redis
+    redis:
+      time-to-live: 3600000
+      cache-null-values: true
+    caffeine:
+      spec: initialCapacity=50,maximumSize=1000,expireAfterWrite=600s
+  # 邮件配置
+  mail:
+    host: ${MAIL_HOST:smtp.example.com}
+    port: ${MAIL_PORT:587}
+    username: ${MAIL_USERNAME}
+    password: ${MAIL_PASSWORD}
+    properties:
+      smtp:
+        auth: true
+        starttls:
+          enable: true
+    from: ${MAIL_FROM:noreply@example.com}
+
+mybatis-plus:
+  mapper-locations: classpath*:/mapper/**/*.xml
+  global-config:
+    db-config:
+      id-type: none
+      logic-delete-field: isDeleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+  configuration:
+    map-underscore-to-camel-case: true
+
+# 安全配置
+security:
+  session:
+    type: jwt
+    access-token-time-to-live: 7200
+    refresh-token-time-to-live: 604800
+    jwt:
+      secret-key: ${JWT_SECRET}
+    redis-token:
+      allow-multi-login: true
+  ignore-urls:
+    - /api/v1/auth/login/**
+    - /api/v1/auth/captcha
+    - /api/v1/auth/sms/code
+    - /api/v1/auth/refresh-token
+    - /api/v1/wxma/auth/**
+    - /api/v1/logs/**
+    - /api/v1/agent/**
+  unsecured-urls:
+    - ${springdoc.swagger-ui.path}
+    - /doc.html
+    - /swagger-ui/**
+    - /v3/api-docs/**
+    - /webjars/**
+    - /favicon.ico
+    - /error
+
+# 文件存储配置
+oss:
+  type: ${OSS_TYPE:minio}
+  minio:
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
+    access-key: ${MINIO_ACCESS_KEY}
+    secret-key: ${MINIO_SECRET_KEY}
+    bucket-name: ${MINIO_BUCKET:godlikeagents}
+    custom-domain:
+  aliyun:
+    endpoint: ${ALIYUN_OSS_ENDPOINT:oss-cn-hangzhou.aliyuncs.com}
+    access-key-id: ${ALIYUN_ACCESS_KEY_ID}
+    access-key-secret: ${ALIYUN_ACCESS_KEY_SECRET}
+    bucket-name: ${ALIYUN_OSS_BUCKET:default}
+  local:
+    storage-path: ${OSS_LOCAL_PATH:/data/files}
+
+# 短信配置
+sms:
+  aliyun:
+    accessKeyId: ${SMS_ACCESS_KEY_ID}
+    accessKeySecret: ${SMS_ACCESS_KEY_SECRET}
+    domain: dysmsapi.aliyuncs.com
+    regionId: cn-shanghai
+    signName: ${SMS_SIGN_NAME}
+    templates:
+      register: ${SMS_TEMPLATE_REGISTER:SMS_22xxx771}
+      login: ${SMS_TEMPLATE_LOGIN:SMS_22xxx772}
+      change-mobile: ${SMS_TEMPLATE_CHANGE_MOBILE:SMS_22xxx773}
+
+# springdoc配置
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    operations-sorter: alpha
+    tags-sorter: alpha
+  api-docs:
+    path: /v3/api-docs
+  group-configs:
+    - group: "系统管理"
+      paths-to-match: "/**"
+      packages-to-scan:
+        - com.hypersense.boot.auth.controller
+        - com.hypersense.boot.system.controller
+        - com.hypersense.boot.platform.file.controller
+        - com.hypersense.boot.platform.codegen.controller
+    - group: "AI智能体"
+      paths-to-match: "/**"
+      packages-to-scan:
+        - com.hypersense.boot.framework.agents.controller
+  default-flat-param-object: true
+
+# knife4j 接口文档配置
+knife4j:
+  enable: true
+  production: true
+  setting:
+    language: zh_cn
+
+# xxl-job 定时任务配置
+xxl:
+  job:
+    enabled: ${XXL_JOB_ENABLED:false}
+    admin:
+      addresses: ${XXL_JOB_ADDRESSES}
+    accessToken: ${XXL_JOB_TOKEN}
+    executor:
+      appname: xxl-job-executor-${spring.application.name}
+      address:
+      ip:
+      port: 9999
+      logpath: /data/applogs/xxl-job/jobhandler
+      logretentiondays: 30
+
+# 验证码配置
+captcha:
+  type: circle
+  width: 120
+  height: 40
+  interfere-count: 2
+  text-alpha: 0.8
+  code:
+    type: math
+    length: 1
+  font:
+    name: SansSerif
+    weight: 1
+    size: 24
+  expire-seconds: 120
+
+# 微信小程序配置
+wx:
+  miniapp:
+    app-id: ${WX_MINIAPP_APP_ID}
+    app-secret: ${WX_MINIAPP_APP_SECRET}
+
+# 多租户配置
+tenant:
+  column: tenant_id
+  ignore-tables:
+    - sys_tenant
+    - sys_tenant_plan
+    - sys_tenant_plan_menu
+    - sys_menu
+    - sys_dict
+    - sys_dict_item
+    - sys_config
+    - gen_table
+    - gen_table_column
+    - agent_memory
+# ============================================
+
+# AI Agent 配置
+agent:
+  llm:
+    provider: openai
+    temperature: 0.7
+    max-tokens: 4096
+    openai:
+      endpoint: ${AGENT_LLM_ENDPOINT:https://open.bigmodel.cn/api/coding/paas/v4}
+      api-key: ${ZHIPU_API_KEY}
+      model-name: ${AGENT_LLM_MODEL:glm-4.7}
+    ollama:
+      endpoint: http://localhost:11434
+      model-name: llama3
+  deep:
+    recursion-limit: 50
+    max-iterations: 25
+    checkpoint-enabled: true
+    session-ttl: 1800
+  # 技能系统配置
+  skills:
+    dirs:
+      - ${AGENT_SKILLS_DIR:/opt/agent-skills}
+  # 长期记忆配置
+  memory:
+    enabled: ${AGENT_MEMORY_ENABLED:true}
+    embedding-model: embedding-3
+    embedding-dimensions: 1536
+    retention-days: 90
+    similarity-threshold: 0.7
+    max-retrieval-count: 10
+  # 工具配置
+  tools:
+    search:
+      enabled: ${AGENT_SEARCH_ENABLED:true}
+      endpoint: ${AGENT_SEARCH_ENDPOINT:http://localhost:8888/search}
+      api-key:
+      max-results: 5
+    sandbox:
+      enabled: ${AGENT_SANDBOX_ENABLED:false}
+      type: ${AGENT_SANDBOX_TYPE:local}
+      timeout: 30
+      max-output-bytes: 65536
+      allowed-languages: python,javascript,shell
+      work-dir: ${java.io.tmpdir}/agent-sandbox
+      local:
+        sanitize-env: true
+      remote:
+        provider: modal
+        endpoint:
+        api-key:
+      custom:
+        runtime: docker
+        image: python:3.12-slim
