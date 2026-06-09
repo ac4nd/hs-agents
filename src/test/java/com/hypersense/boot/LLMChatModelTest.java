@@ -27,10 +27,10 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class LLMChatModelTest {
 
-    // ========== 配置常量（与 application-local.yml 保持一致） ==========
-    private static final String ENDPOINT = "https://open.bigmodel.cn/api/coding/paas/v4";
-    private static final String API_KEY = "40a1cff4ec6c45a09704ec79550211a3.eLcaJYrFS2unG829";
-    private static final String MODEL_NAME = "glm-4.7";
+    // ========== 配置常量（通过环境变量注入，与 application-local.yml 保持一致） ==========
+    private static final String ENDPOINT = System.getenv().getOrDefault("LLM_ENDPOINT", "https://open.bigmodel.cn/api/coding/paas/v4");
+    private static final String API_KEY = System.getenv().getOrDefault("LLM_API_KEY", "");
+    private static final String MODEL_NAME = System.getenv().getOrDefault("LLM_MODEL", "glm-4.7");
     private static final double TEMPERATURE = 0.7;
     private static final int MAX_TOKENS = 4096;
 
