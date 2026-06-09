@@ -18,7 +18,7 @@ import java.util.List;
  *
  * <h3>配置示例：</h3>
  * <pre>
- * # application-dev.yml
+ * # application-local.yml
  * agent:
  *   skills:
  *     dirs:

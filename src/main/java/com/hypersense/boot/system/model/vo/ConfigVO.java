@@ -1,13 +1,10 @@
 package com.hypersense.boot.system.model.vo;
 
-import com.baomidou.mybatisplus.annotation.IdType;
-import com.baomidou.mybatisplus.annotation.TableId;
+
 import io.swagger.v3.oas.annotations.media.Schema;
 import lombok.Builder;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
-import java.io.Serial;
-import java.io.Serializable;
 
 /**
  * 系统配置视图对象

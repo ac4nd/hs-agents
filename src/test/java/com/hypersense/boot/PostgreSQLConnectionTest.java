@@ -10,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.*;
 /**
  * PostgreSQL 数据库连接测试
  * <p>
- * 基于 application-dev.yml 中的数据源配置，验证 PostgreSQL 连接的可用性。
+ * 基于 application-local.yml 中的数据源配置，验证 PostgreSQL 连接的可用性。
  *
  * @author test
  */

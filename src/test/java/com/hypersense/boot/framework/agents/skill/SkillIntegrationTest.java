@@ -177,7 +177,7 @@ class SkillIntegrationTest {
             valueOperations = mock(ValueOperations.class);
             sandboxManager = mock(SandboxManager.class);
 
-            // 模拟 AgentProperties 中的技能配置（等价于 application-dev.yml 的 agent.skills.dirs）
+            // 模拟 AgentProperties 中的技能配置（等价于 application-local.yml 的 agent.skills.dirs）
             agentProperties = new AgentProperties();
             agentProperties.getSkills().setDirs(List.of(REAL_SKILLS_DIR));
 
