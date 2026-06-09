@@ -6,9 +6,9 @@ spring:
     type: com.alibaba.druid.pool.DruidDataSource
     # === PostgreSQL 数据源（默认启用） ===
     driver-class-name: org.postgresql.Driver
-    url: jdbc:postgresql://47.107.160.31:5432/godlikeagents?currentSchema=public&stringtype=unspecified
-    username: postgres
-    password: 123456
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:godlikeagents}?currentSchema=public&stringtype=unspecified
+    username: ${DB_USERNAME:postgres}
+    password: ${DB_PASSWORD:123456}
     druid:
       initial-size: 5
       min-idle: 5
@@ -56,14 +56,14 @@ spring:
     host: smtp.example.com
     port: 587
     username: your-email@example.com
-    password: 123456
+    password: ${MAIL_PASSWORD:123456}
     properties:
       smtp:
         auth: true
         starttls:
           enable: true
     # 邮件发送者
-    from: 18659922013@163.com
+    from: ${MAIL_FROM:your-email@example.com}
 
 mybatis-plus:
   mapper-locations: classpath*:/mapper/**/*.xml
@@ -119,11 +119,11 @@ oss:
   # MinIO 对象存储服务
   minio:
     # MinIO 服务地址
-    endpoint: http://47.107.160.31:9000
+    endpoint: ${MINIO_ENDPOINT:http://localhost:9000}
     # 访问凭据
-    access-key: minioadmin
+    access-key: ${MINIO_ACCESS_KEY:minioadmin}
     # 凭据密钥
-    secret-key: minioadmin
+    secret-key: ${MINIO_SECRET_KEY:minioadmin}
     # 存储桶名称
     bucket-name: godlikeagents
     # (可选) 自定义域名：配置后，文件 URL 会使用该域名格式
@@ -150,7 +150,7 @@ sms:
     accessKeySecret: ${SMS_ACCESS_KEY_SECRET:your-sms-access-key-secret}
     domain: dysmsapi.aliyuncs.com
     regionId: cn-shanghai
-    signName: 氦闪技术
+    signName: ${SMS_SIGN_NAME:your-sign-name}
     templates:
       #  注册短信验证码模板
       register: SMS_22xxx771
@@ -197,7 +197,7 @@ xxl:
     enabled: false
     admin:
       # 调度中心地址,多个逗号分隔
-      addresses: http://47.107.160.31:8080/xxl-job-admin
+      addresses: ${XXL_JOB_ADMIN_ADDRESSES:http://localhost:8080/xxl-job-admin}
     accessToken: ${XXL_JOB_TOKEN:default_token}
     # 执行器配置
     executor:
@@ -272,9 +272,9 @@ agent:
     max-tokens: 4096
     # OpenAI 兼容 API 配置（支持 OpenAI / DeepSeek / 通义千问等）
     openai:
-      endpoint: https://open.bigmodel.cn/api/coding/paas/v4
-      api-key: f6de7aff013e49be9fdd432f17e7aca7.HyRXWDaXBUdcDS2b
-      model-name: glm-4.7
+      endpoint: ${LLM_ENDPOINT:https://open.bigmodel.cn/api/coding/paas/v4}
+      api-key: ${LLM_API_KEY:your-api-key}
+      model-name: ${LLM_MODEL:glm-4.7}
     # Ollama 本地模型配置
     ollama:
       endpoint: http://localhost:11434
@@ -291,7 +291,7 @@ agent:
   # 技能系统配置
   skills:
     dirs:
-      - D:/project/myproject/ac4nd/skills
+      - ${AGENT_SKILLS_DIR:./skills}
   # 长期记忆配置（智谱 Embedding-3 + pgvector）
   memory:
     enabled: true
@@ -306,7 +306,7 @@ agent:
       # 是否启用网络搜索（SearXNG 已部署在远程服务器）
       enabled: true
       # SearXNG 搜索 API 地址
-      endpoint: http://47.107.160.31:8888/search
+      endpoint: ${SEARXNG_ENDPOINT:http://localhost:8888/search}
       # API 密钥（SerpAPI 等需要，SearXNG 不需要）
       api-key:
       # 最大返回条数
