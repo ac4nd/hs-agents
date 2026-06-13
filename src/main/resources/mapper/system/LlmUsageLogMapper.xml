@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.hypersense.boot.system.mapper.LlmUsageLogMapper">
+    <select id="getUsageLogPage" resultType="com.hypersense.boot.system.model.vo.LlmUsageLogVO">
+        SELECT
+            t1.id,
+            t1.api_key_config_id,
+            t3.key_name AS apiKeyName,
+            t1.vendor_config_id,
+            t2.vendor_name,
+            t1.model_name,
+            t1.input_tokens,
+            t1.output_tokens,
+            t1.cost,
+            t1.request_id,
+            t1.user_id,
+            t1.duration_ms,
+            t1.status,
+            t1.error_message,
+            t1.create_time
+        FROM sys_llm_usage_log t1
+        LEFT JOIN sys_llm_vendor_config t2 ON t1.vendor_config_id = t2.id AND t2.is_deleted = 0
+        LEFT JOIN sys_llm_api_key_config t3 ON t1.api_key_config_id = t3.id AND t3.is_deleted = 0
+        <where>
+            <if test='queryParams.modelName != null and queryParams.modelName.trim() neq ""'>
+                AND t1.model_name LIKE '%' || #{queryParams.modelName} || '%'
+            </if>
+            <if test='queryParams.apiKeyConfigId != null'>
+                AND t1.api_key_config_id = #{queryParams.apiKeyConfigId}
+            </if>
+            <if test='queryParams.vendorConfigId != null'>
+                AND t1.vendor_config_id = #{queryParams.vendorConfigId}
+            </if>
+            <if test='queryParams.status != null'>
+                AND t1.status = #{queryParams.status}
+            </if>
+            <if test='queryParams.startTime != null'>
+                AND t1.create_time >= #{queryParams.startTime}
+            </if>
+            <if test='queryParams.endTime != null'>
+                AND t1.create_time &lt;= #{queryParams.endTime}
+            </if>
+        </where>
+        ORDER BY t1.create_time DESC
+    </select>
+</mapper>

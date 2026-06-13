@@ -25,6 +25,7 @@ public enum LogModuleEnum implements IBaseEnum<Integer> {
     LOG(10, "日志管理"),
     CODEGEN(11, "代码生成"),
     AGENT(12, "AI智能体"),
+    LLM_CONFIG(13, "LLM配置"),
     OTHER(99, "其他");
 
     @EnumValue

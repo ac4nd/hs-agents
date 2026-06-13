@@ -246,6 +246,35 @@ INSERT INTO sys_menu VALUES (1203, 120, '0,1,120', '套餐编辑', 'B', NULL, ''
 INSERT INTO sys_menu VALUES (1204, 120, '0,1,120', '套餐删除', 'B', NULL, '', NULL, 'sys:tenant-plan:delete', NULL, NULL, 1, 4, '', NULL, now(), now(), NULL);
 INSERT INTO sys_menu VALUES (1205, 120, '0,1,120', '套餐菜单配置', 'B', NULL, '', NULL, 'sys:tenant-plan:assign', NULL, NULL, 1, 5, '', NULL, now(), now(), NULL);
 
+-- LLM 管理（平台管理下）
+-- 厂商配置（平台范围）
+INSERT INTO sys_menu VALUES (130,   1,   '0,1',     '厂商配置',     'M', 'LlmVendorConfig', 'vendor-config',  'system/llm/vendor-config/index',  NULL, NULL, 1, 1, 3, 'Building2',        NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1301,  130, '0,1,130', '厂商配置查询', 'B', NULL, '', NULL, 'sys:llm-vendor-config:list',   NULL, NULL, 1, 1, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1302,  130, '0,1,130', '厂商配置新增', 'B', NULL, '', NULL, 'sys:llm-vendor-config:create', NULL, NULL, 1, 2, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1303,  130, '0,1,130', '厂商配置修改', 'B', NULL, '', NULL, 'sys:llm-vendor-config:update', NULL, NULL, 1, 3, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1304,  130, '0,1,130', '厂商配置删除', 'B', NULL, '', NULL, 'sys:llm-vendor-config:delete', NULL, NULL, 1, 4, '', NULL, now(), now(), NULL);
+-- 计费规则（平台范围）
+INSERT INTO sys_menu VALUES (140,   1,   '0,1',     '计费规则',     'M', 'LlmBillingRule', 'billing-rule',  'system/llm/billing-rule/index',  NULL, NULL, 1, 1, 4, 'Coins',            NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1401,  140, '0,1,140', '计费规则查询', 'B', NULL, '', NULL, 'sys:llm-billing-rule:list',   NULL, NULL, 1, 1, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1402,  140, '0,1,140', '计费规则新增', 'B', NULL, '', NULL, 'sys:llm-billing-rule:create', NULL, NULL, 1, 2, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1403,  140, '0,1,140', '计费规则修改', 'B', NULL, '', NULL, 'sys:llm-billing-rule:update', NULL, NULL, 1, 3, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1404,  140, '0,1,140', '计费规则删除', 'B', NULL, '', NULL, 'sys:llm-billing-rule:delete', NULL, NULL, 1, 4, '', NULL, now(), now(), NULL);
+-- API-KEY配置（平台范围）
+INSERT INTO sys_menu VALUES (150,   1,   '0,1',     'API-KEY配置', 'M', 'LlmApiKeyConfig', 'api-key-config', 'system/llm/api-key-config/index', NULL, NULL, 1, 1, 5, 'KeyRound',         NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1501,  150, '0,1,150', 'API-KEY查询', 'B', NULL, '', NULL, 'sys:llm-api-key-config:list',   NULL, NULL, 1, 1, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1502,  150, '0,1,150', 'API-KEY新增', 'B', NULL, '', NULL, 'sys:llm-api-key-config:create', NULL, NULL, 1, 2, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1503,  150, '0,1,150', 'API-KEY修改', 'B', NULL, '', NULL, 'sys:llm-api-key-config:update', NULL, NULL, 1, 3, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1504,  150, '0,1,150', 'API-KEY删除', 'B', NULL, '', NULL, 'sys:llm-api-key-config:delete', NULL, NULL, 1, 4, '', NULL, now(), now(), NULL);
+-- 模型配置（平台范围）
+INSERT INTO sys_menu VALUES (160,   1,   '0,1',     '模型配置',     'M', 'LlmModelConfig', 'model-config',   'system/llm/model-config/index',   NULL, NULL, 1, 1, 6, 'SlidersHorizontal', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1601,  160, '0,1,160', '模型配置查询', 'B', NULL, '', NULL, 'sys:llm-model-config:list',   NULL, NULL, 1, 1, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1602,  160, '0,1,160', '模型配置新增', 'B', NULL, '', NULL, 'sys:llm-model-config:create', NULL, NULL, 1, 2, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1603,  160, '0,1,160', '模型配置修改', 'B', NULL, '', NULL, 'sys:llm-model-config:update', NULL, NULL, 1, 3, '', NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1604,  160, '0,1,160', '模型配置删除', 'B', NULL, '', NULL, 'sys:llm-model-config:delete', NULL, NULL, 1, 4, '', NULL, now(), now(), NULL);
+-- 用量日志（业务范围 —— 租户可见，scope 在迁移段单独设为 2）
+INSERT INTO sys_menu VALUES (170,   1,   '0,1',     '用量日志',     'M', 'LlmUsageLog', 'usage-log',         'system/llm/usage-log/index',      NULL, NULL, 1, 1, 7, 'BarChart3',        NULL, now(), now(), NULL);
+INSERT INTO sys_menu VALUES (1701,  170, '0,1,170', '用量日志查询', 'B', NULL, '', NULL, 'sys:llm-usage-log:list',       NULL, NULL, 1, 1, '', NULL, now(), now(), NULL);
+
 -- 系统管理（租户侧）
 INSERT INTO sys_menu VALUES (210, 2, '0,2', '用户管理', 'M', 'User', 'user', 'system/user/index', NULL, NULL, 1, 1, 1, 'User', NULL, now(), now(), NULL);
 INSERT INTO sys_menu VALUES (2101, 210, '0,2,210', '用户查询', 'B', NULL, '', NULL, 'sys:user:list', NULL, NULL, 1, 1, '', NULL, now(), now(), NULL);
@@ -354,6 +383,10 @@ COMMENT ON COLUMN sys_menu.scope IS '菜单范围(1=平台菜单 2=业务菜单)
 UPDATE sys_menu
 SET scope = 1
 WHERE id = 1 OR tree_path LIKE '0,1%';
+
+-- 用量日志(170/1701) 虽挂在平台管理下，但属于业务菜单（租户可见自己的用量）
+-- 上面 LIKE '0,1%' 会把它误设为平台菜单，这里改回 scope=2
+UPDATE sys_menu SET scope = 2 WHERE id IN (170, 1701);
 
 -- ----------------------------
 -- Table structure for sys_tenant_menu
@@ -1112,6 +1145,292 @@ INSERT INTO sys_tenant (
 
 
 -- ----------------------------
+-- Table structure for sys_llm_vendor_config
+-- ----------------------------
+DROP TABLE IF EXISTS sys_llm_vendor_config;
+CREATE TABLE sys_llm_vendor_config (
+    id BIGSERIAL,
+    vendor_name VARCHAR(100) NOT NULL,
+    vendor_code VARCHAR(50) NOT NULL,
+    config_key VARCHAR(200) NOT NULL,
+    is_coding_plan SMALLINT DEFAULT 0,
+    access_level SMALLINT DEFAULT 1,
+    base_url VARCHAR(500) NOT NULL,
+    available_quota DECIMAL(18,6) DEFAULT NULL,
+    used_quota DECIMAL(18,6) DEFAULT 0,
+    quota_unit VARCHAR(20) DEFAULT 'CNY',
+    status SMALLINT DEFAULT 1,
+    sort INTEGER DEFAULT 0,
+    remark VARCHAR(500),
+    create_by BIGINT,
+    create_time TIMESTAMP,
+    update_by BIGINT,
+    update_time TIMESTAMP,
+    is_deleted SMALLINT DEFAULT 0,
+    PRIMARY KEY (id)
+);
+
+CREATE UNIQUE INDEX uk_sys_llm_vendor_code ON sys_llm_vendor_config (vendor_code, is_deleted);
+CREATE INDEX idx_sys_llm_vendor_status ON sys_llm_vendor_config (status);
+
+COMMENT ON TABLE sys_llm_vendor_config IS 'LLM厂商配置表(容量池)';
+COMMENT ON COLUMN sys_llm_vendor_config.id IS '主键';
+COMMENT ON COLUMN sys_llm_vendor_config.vendor_name IS '厂商名称(如:智谱AI、DeepSeek、OpenAI)';
+COMMENT ON COLUMN sys_llm_vendor_config.vendor_code IS '厂商编码(如:ZHIPU、DEEPSEEK、OPENAI)';
+COMMENT ON COLUMN sys_llm_vendor_config.config_key IS 'API-KEY配置键名(如:llm.vendor.zhipu.key-1)，运行时通过Spring Environment解析';
+COMMENT ON COLUMN sys_llm_vendor_config.is_coding_plan IS '是否为编码套餐(0-否 1-是)';
+COMMENT ON COLUMN sys_llm_vendor_config.access_level IS '接入标准(1-标准 2-高级 3-旗舰)';
+COMMENT ON COLUMN sys_llm_vendor_config.base_url IS 'API基础地址(如:https://open.bigmodel.cn/api/paas/v4)';
+COMMENT ON COLUMN sys_llm_vendor_config.available_quota IS '可用额度(NULL表示无限制)';
+COMMENT ON COLUMN sys_llm_vendor_config.used_quota IS '已用额度';
+COMMENT ON COLUMN sys_llm_vendor_config.quota_unit IS '额度单位(CNY/USD/TOKENS)';
+COMMENT ON COLUMN sys_llm_vendor_config.status IS '状态(1-启用 0-禁用)';
+COMMENT ON COLUMN sys_llm_vendor_config.sort IS '排序';
+COMMENT ON COLUMN sys_llm_vendor_config.remark IS '备注';
+COMMENT ON COLUMN sys_llm_vendor_config.create_by IS '创建人ID';
+COMMENT ON COLUMN sys_llm_vendor_config.create_time IS '创建时间';
+COMMENT ON COLUMN sys_llm_vendor_config.update_by IS '修改人ID';
+COMMENT ON COLUMN sys_llm_vendor_config.update_time IS '更新时间';
+COMMENT ON COLUMN sys_llm_vendor_config.is_deleted IS '逻辑删除标识(0-未删除 1-已删除)';
+
+-- ----------------------------
+-- Records of sys_llm_vendor_config
+-- ----------------------------
+INSERT INTO sys_llm_vendor_config (id, vendor_name, vendor_code, config_key, is_coding_plan, access_level, base_url, available_quota, used_quota, quota_unit, status, sort, remark, create_by, create_time, update_by, update_time, is_deleted)
+VALUES
+(1, '智谱AI(生产)', 'ZHIPU', 'llm.vendor.zhipu.key-1', 1, 2, 'https://open.bigmodel.cn/api/paas/v4', 10000.000000, 0, 'CNY', 1, 1, '智谱AI GLM系列生产环境', NULL, now(), NULL, now(), 0),
+(2, 'DeepSeek', 'DEEPSEEK', 'llm.vendor.deepseek.key-1', 0, 1, 'https://api.deepseek.com/v1', 5000.000000, 0, 'CNY', 1, 2, 'DeepSeek高性价比模型', NULL, now(), NULL, now(), 0),
+(3, 'OpenAI', 'OPENAI', 'llm.vendor.openai.key-1', 0, 3, 'https://api.openai.com/v1', 500.000000, 0, 'USD', 1, 3, 'OpenAI GPT系列旗舰模型', NULL, now(), NULL, now(), 0);
+
+
+-- ----------------------------
+-- Table structure for sys_llm_billing_rule
+-- ----------------------------
+DROP TABLE IF EXISTS sys_llm_billing_rule;
+CREATE TABLE sys_llm_billing_rule (
+    id BIGSERIAL,
+    rule_name VARCHAR(100) NOT NULL,
+    vendor_config_id BIGINT NOT NULL,
+    model_name VARCHAR(100) NOT NULL,
+    input_price DECIMAL(18,8) NOT NULL DEFAULT 0,
+    output_price DECIMAL(18,8) NOT NULL DEFAULT 0,
+    price_unit VARCHAR(30) NOT NULL DEFAULT 'per_1k_tokens',
+    currency VARCHAR(10) NOT NULL DEFAULT 'CNY',
+    billing_type SMALLINT DEFAULT 1,
+    status SMALLINT DEFAULT 1,
+    sort INTEGER DEFAULT 0,
+    remark VARCHAR(500),
+    create_by BIGINT,
+    create_time TIMESTAMP,
+    update_by BIGINT,
+    update_time TIMESTAMP,
+    is_deleted SMALLINT DEFAULT 0,
+    PRIMARY KEY (id)
+);
+
+CREATE UNIQUE INDEX uk_sys_llm_billing_vendor_model ON sys_llm_billing_rule (vendor_config_id, model_name, is_deleted);
+CREATE INDEX idx_sys_llm_billing_vendor ON sys_llm_billing_rule (vendor_config_id);
+CREATE INDEX idx_sys_llm_billing_model ON sys_llm_billing_rule (model_name);
+
+COMMENT ON TABLE sys_llm_billing_rule IS 'LLM计费规则表';
+COMMENT ON COLUMN sys_llm_billing_rule.id IS '主键';
+COMMENT ON COLUMN sys_llm_billing_rule.rule_name IS '规则名称(如:GLM-4标准计费)';
+COMMENT ON COLUMN sys_llm_billing_rule.vendor_config_id IS '关联厂商配置ID(sys_llm_vendor_config.id)';
+COMMENT ON COLUMN sys_llm_billing_rule.model_name IS '模型名称(如:glm-4, deepseek-chat, gpt-4o)';
+COMMENT ON COLUMN sys_llm_billing_rule.input_price IS '输入价格(每单位token价格)';
+COMMENT ON COLUMN sys_llm_billing_rule.output_price IS '输出价格(每单位token价格)';
+COMMENT ON COLUMN sys_llm_billing_rule.price_unit IS '计价单位(per_1k_tokens-每千token per_1m_tokens-每百万token)';
+COMMENT ON COLUMN sys_llm_billing_rule.currency IS '币种(CNY/USD)';
+COMMENT ON COLUMN sys_llm_billing_rule.billing_type IS '计费类型(1-按Token计费 2-按次计费 3-套餐包)';
+COMMENT ON COLUMN sys_llm_billing_rule.status IS '状态(1-启用 0-禁用)';
+COMMENT ON COLUMN sys_llm_billing_rule.sort IS '排序';
+COMMENT ON COLUMN sys_llm_billing_rule.remark IS '备注';
+COMMENT ON COLUMN sys_llm_billing_rule.create_by IS '创建人ID';
+COMMENT ON COLUMN sys_llm_billing_rule.create_time IS '创建时间';
+COMMENT ON COLUMN sys_llm_billing_rule.update_by IS '修改人ID';
+COMMENT ON COLUMN sys_llm_billing_rule.update_time IS '更新时间';
+COMMENT ON COLUMN sys_llm_billing_rule.is_deleted IS '逻辑删除标识(0-未删除 1-已删除)';
+
+-- ----------------------------
+-- Records of sys_llm_billing_rule
+-- ----------------------------
+INSERT INTO sys_llm_billing_rule (id, rule_name, vendor_config_id, model_name, input_price, output_price, price_unit, currency, billing_type, status, sort, remark, create_by, create_time, update_by, update_time, is_deleted)
+VALUES
+(1, 'GLM-4标准计费', 1, 'glm-4', 0.00010000, 0.00010000, 'per_1k_tokens', 'CNY', 1, 1, 1, '智谱GLM-4统一价格', NULL, now(), NULL, now(), 0),
+(2, 'GLM-4-Flash计费', 1, 'glm-4-flash', 0.00001000, 0.00001000, 'per_1k_tokens', 'CNY', 1, 1, 2, '智谱GLM-4-Flash低价模型', NULL, now(), NULL, now(), 0),
+(3, 'DeepSeek-Chat计费', 2, 'deepseek-chat', 0.00000100, 0.00000200, 'per_1k_tokens', 'CNY', 1, 1, 1, 'DeepSeek-V3超低价格', NULL, now(), NULL, now(), 0),
+(4, 'GPT-4o计费', 3, 'gpt-4o', 0.00000250, 0.00001000, 'per_1k_tokens', 'USD', 1, 1, 1, 'OpenAI GPT-4o标准价格', NULL, now(), NULL, now(), 0);
+
+
+-- ----------------------------
+-- Table structure for sys_llm_api_key_config
+-- ----------------------------
+DROP TABLE IF EXISTS sys_llm_api_key_config;
+CREATE TABLE sys_llm_api_key_config (
+    id BIGSERIAL,
+    tenant_id BIGINT DEFAULT 0,
+    key_name VARCHAR(100) NOT NULL,
+    secret VARCHAR(200) NOT NULL,
+    vendor_config_id BIGINT NOT NULL,
+    rate_limit_rpm INTEGER DEFAULT NULL,
+    rate_limit_tpd INTEGER DEFAULT NULL,
+    max_tokens_per_day BIGINT DEFAULT NULL,
+    used_tokens BIGINT DEFAULT 0,
+    total_cost DECIMAL(18,6) DEFAULT 0,
+    expires_at TIMESTAMP DEFAULT NULL,
+    status SMALLINT DEFAULT 1,
+    remark VARCHAR(500),
+    create_by BIGINT,
+    create_time TIMESTAMP,
+    update_by BIGINT,
+    update_time TIMESTAMP,
+    is_deleted SMALLINT DEFAULT 0,
+    PRIMARY KEY (id)
+);
+
+CREATE UNIQUE INDEX uk_sys_llm_apikey_secret ON sys_llm_api_key_config (secret, is_deleted);
+CREATE INDEX idx_sys_llm_apikey_tenant ON sys_llm_api_key_config (tenant_id);
+CREATE INDEX idx_sys_llm_apikey_vendor ON sys_llm_api_key_config (vendor_config_id);
+
+COMMENT ON TABLE sys_llm_api_key_config IS '系统API-KEY配置表(租户侧)';
+COMMENT ON COLUMN sys_llm_api_key_config.id IS '主键';
+COMMENT ON COLUMN sys_llm_api_key_config.tenant_id IS '租户ID';
+COMMENT ON COLUMN sys_llm_api_key_config.key_name IS 'API-KEY名称(如:生产环境Key-1)';
+COMMENT ON COLUMN sys_llm_api_key_config.secret IS '系统生成的签名密钥(用于租户终端用户鉴权)';
+COMMENT ON COLUMN sys_llm_api_key_config.vendor_config_id IS '关联厂商配置ID(sys_llm_vendor_config.id，容量池)';
+COMMENT ON COLUMN sys_llm_api_key_config.rate_limit_rpm IS '每分钟请求限制(NULL表示不限)';
+COMMENT ON COLUMN sys_llm_api_key_config.rate_limit_tpd IS '每日Token消耗限制(NULL表示不限)';
+COMMENT ON COLUMN sys_llm_api_key_config.max_tokens_per_day IS '每日最大Token数(NULL表示不限)';
+COMMENT ON COLUMN sys_llm_api_key_config.used_tokens IS '已使用Token数(累计)';
+COMMENT ON COLUMN sys_llm_api_key_config.total_cost IS '累计费用';
+COMMENT ON COLUMN sys_llm_api_key_config.expires_at IS '过期时间(NULL表示永不过期)';
+COMMENT ON COLUMN sys_llm_api_key_config.status IS '状态(1-启用 0-禁用)';
+COMMENT ON COLUMN sys_llm_api_key_config.remark IS '备注';
+COMMENT ON COLUMN sys_llm_api_key_config.create_by IS '创建人ID';
+COMMENT ON COLUMN sys_llm_api_key_config.create_time IS '创建时间';
+COMMENT ON COLUMN sys_llm_api_key_config.update_by IS '修改人ID';
+COMMENT ON COLUMN sys_llm_api_key_config.update_time IS '更新时间';
+COMMENT ON COLUMN sys_llm_api_key_config.is_deleted IS '逻辑删除标识(0-未删除 1-已删除)';
+
+-- ----------------------------
+-- Records of sys_llm_api_key_config
+-- ----------------------------
+INSERT INTO sys_llm_api_key_config (id, tenant_id, key_name, secret, vendor_config_id, rate_limit_rpm, rate_limit_tpd, max_tokens_per_day, used_tokens, total_cost, expires_at, status, remark, create_by, create_time, update_by, update_time, is_deleted)
+VALUES
+(1, 1, '演示租户-智谱生产Key', 'sk-sys-a1b2c3d4e5f6g7h8i9j0', 1, 60, 100000, 500000, 0, 0, NULL, 1, '演示租户接入智谱生产环境', NULL, now(), NULL, now(), 0),
+(2, 1, '演示租户-DeepSeek测试Key', 'sk-sys-z9y8x7w6v5u4t3s2r1q0', 2, 30, 50000, 200000, 0, 0, NULL, 1, '演示租户接入DeepSeek测试', NULL, now(), NULL, now(), 0);
+
+
+-- ----------------------------
+-- Table structure for sys_llm_model_config
+-- ----------------------------
+DROP TABLE IF EXISTS sys_llm_model_config;
+CREATE TABLE sys_llm_model_config (
+    id BIGSERIAL,
+    tenant_id BIGINT DEFAULT 0,
+    api_key_config_id BIGINT NOT NULL,
+    model_name VARCHAR(100) NOT NULL,
+    model_display_name VARCHAR(100),
+    context_window_size INTEGER NOT NULL,
+    max_output_tokens INTEGER NOT NULL,
+    model_capabilities VARCHAR(500) DEFAULT NULL,
+    temperature DECIMAL(3,2) DEFAULT 0.70,
+    top_p DECIMAL(3,2) DEFAULT 1.00,
+    is_streaming SMALLINT DEFAULT 1,
+    status SMALLINT DEFAULT 1,
+    sort INTEGER DEFAULT 0,
+    remark VARCHAR(500),
+    create_by BIGINT,
+    create_time TIMESTAMP,
+    update_by BIGINT,
+    update_time TIMESTAMP,
+    is_deleted SMALLINT DEFAULT 0,
+    PRIMARY KEY (id)
+);
+
+CREATE UNIQUE INDEX uk_sys_llm_model_key_model ON sys_llm_model_config (api_key_config_id, model_name, is_deleted);
+CREATE INDEX idx_sys_llm_model_tenant ON sys_llm_model_config (tenant_id);
+CREATE INDEX idx_sys_llm_model_apikey ON sys_llm_model_config (api_key_config_id);
+CREATE INDEX idx_sys_llm_model_name ON sys_llm_model_config (model_name);
+
+COMMENT ON TABLE sys_llm_model_config IS 'LLM模型配置表';
+COMMENT ON COLUMN sys_llm_model_config.id IS '主键';
+COMMENT ON COLUMN sys_llm_model_config.tenant_id IS '租户ID';
+COMMENT ON COLUMN sys_llm_model_config.api_key_config_id IS '关联系统API-KEY配置ID(sys_llm_api_key_config.id)';
+COMMENT ON COLUMN sys_llm_model_config.model_name IS '模型名称(如:glm-4, deepseek-chat, gpt-4o)';
+COMMENT ON COLUMN sys_llm_model_config.model_display_name IS '模型显示名称(如:GLM-4旗舰模型)';
+COMMENT ON COLUMN sys_llm_model_config.context_window_size IS '上下文窗口大小(token数)';
+COMMENT ON COLUMN sys_llm_model_config.max_output_tokens IS '最大输出Token数';
+COMMENT ON COLUMN sys_llm_model_config.model_capabilities IS '模型能力标签(JSON数组,如:["chat","function_call","vision"])';
+COMMENT ON COLUMN sys_llm_model_config.temperature IS '默认温度参数(0.00-2.00)';
+COMMENT ON COLUMN sys_llm_model_config.top_p IS '默认Top-P参数(0.00-1.00)';
+COMMENT ON COLUMN sys_llm_model_config.is_streaming IS '是否启用流式输出(0-否 1-是)';
+COMMENT ON COLUMN sys_llm_model_config.status IS '状态(1-启用 0-禁用)';
+COMMENT ON COLUMN sys_llm_model_config.sort IS '排序';
+COMMENT ON COLUMN sys_llm_model_config.remark IS '备注';
+COMMENT ON COLUMN sys_llm_model_config.create_by IS '创建人ID';
+COMMENT ON COLUMN sys_llm_model_config.create_time IS '创建时间';
+COMMENT ON COLUMN sys_llm_model_config.create_by IS '创建人ID';
+COMMENT ON COLUMN sys_llm_model_config.update_by IS '修改人ID';
+COMMENT ON COLUMN sys_llm_model_config.update_time IS '更新时间';
+COMMENT ON COLUMN sys_llm_model_config.is_deleted IS '逻辑删除标识(0-未删除 1-已删除)';
+
+-- ----------------------------
+-- Records of sys_llm_model_config
+-- ----------------------------
+INSERT INTO sys_llm_model_config (id, tenant_id, api_key_config_id, model_name, model_display_name, context_window_size, max_output_tokens, model_capabilities, temperature, top_p, is_streaming, status, sort, remark, create_by, create_time, update_by, update_time, is_deleted)
+VALUES
+(1, 1, 1, 'glm-4', 'GLM-4旗舰模型', 128000, 4096, '["chat","function_call","code"]', 0.70, 1.00, 1, 1, 1, '智谱GLM-4主力模型', NULL, now(), NULL, now(), 0),
+(2, 1, 1, 'glm-4-flash', 'GLM-4-Flash高速模型', 128000, 4096, '["chat","function_call"]', 0.70, 1.00, 1, 1, 2, '智谱GLM-4快速推理模型', NULL, now(), NULL, now(), 0),
+(3, 1, 2, 'deepseek-chat', 'DeepSeek-V3', 64000, 8192, '["chat","function_call","code","reasoning"]', 0.70, 1.00, 1, 1, 1, 'DeepSeek通用对话模型', NULL, now(), NULL, now(), 0);
+
+
+-- ----------------------------
+-- Table structure for sys_llm_usage_log
+-- ----------------------------
+DROP TABLE IF EXISTS sys_llm_usage_log;
+CREATE TABLE sys_llm_usage_log (
+    id BIGSERIAL,
+    tenant_id BIGINT DEFAULT 0,
+    api_key_config_id BIGINT NOT NULL,
+    vendor_config_id BIGINT NOT NULL,
+    model_name VARCHAR(100) NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cost DECIMAL(18,6) NOT NULL DEFAULT 0,
+    request_id VARCHAR(100),
+    user_id BIGINT,
+    duration_ms INTEGER,
+    status SMALLINT DEFAULT 1,
+    error_message VARCHAR(500),
+    create_time TIMESTAMP,
+    PRIMARY KEY (id)
+);
+
+CREATE INDEX idx_sys_llm_usage_tenant ON sys_llm_usage_log (tenant_id);
+CREATE INDEX idx_sys_llm_usage_apikey ON sys_llm_usage_log (api_key_config_id);
+CREATE INDEX idx_sys_llm_usage_vendor ON sys_llm_usage_log (vendor_config_id);
+CREATE INDEX idx_sys_llm_usage_model ON sys_llm_usage_log (model_name);
+CREATE INDEX idx_sys_llm_usage_time ON sys_llm_usage_log (create_time);
+
+COMMENT ON TABLE sys_llm_usage_log IS 'LLM调用用量日志表';
+COMMENT ON COLUMN sys_llm_usage_log.id IS '主键';
+COMMENT ON COLUMN sys_llm_usage_log.tenant_id IS '租户ID';
+COMMENT ON COLUMN sys_llm_usage_log.api_key_config_id IS '关联系统API-KEY配置ID(sys_llm_api_key_config.id)';
+COMMENT ON COLUMN sys_llm_usage_log.vendor_config_id IS '关联厂商配置ID(sys_llm_vendor_config.id，冗余加速查询)';
+COMMENT ON COLUMN sys_llm_usage_log.model_name IS '实际调用的模型名称';
+COMMENT ON COLUMN sys_llm_usage_log.input_tokens IS '本次输入Token数';
+COMMENT ON COLUMN sys_llm_usage_log.output_tokens IS '本次输出Token数';
+COMMENT ON COLUMN sys_llm_usage_log.cost IS '本次费用(按billing_rule计算)';
+COMMENT ON COLUMN sys_llm_usage_log.request_id IS '请求追踪ID';
+COMMENT ON COLUMN sys_llm_usage_log.user_id IS '调用用户ID';
+COMMENT ON COLUMN sys_llm_usage_log.duration_ms IS '响应耗时(毫秒)';
+COMMENT ON COLUMN sys_llm_usage_log.status IS '调用状态(1-成功 0-失败)';
+COMMENT ON COLUMN sys_llm_usage_log.error_message IS '失败原因';
+COMMENT ON COLUMN sys_llm_usage_log.create_time IS '调用时间';
+
+
+-- ----------------------------
 -- 重置序列 (使自增ID从已有最大值继续)
 -- ----------------------------
 SELECT setval(pg_get_serial_sequence('sys_dept', 'id'), COALESCE((SELECT MAX(id) FROM sys_dept), 1));
@@ -1128,3 +1447,8 @@ SELECT setval(pg_get_serial_sequence('sys_config', 'id'), COALESCE((SELECT MAX(i
 SELECT setval(pg_get_serial_sequence('sys_notice', 'id'), COALESCE((SELECT MAX(id) FROM sys_notice), 1));
 SELECT setval(pg_get_serial_sequence('sys_user_notice', 'id'), COALESCE((SELECT MAX(id) FROM sys_user_notice), 1));
 SELECT setval(pg_get_serial_sequence('sys_tenant', 'id'), COALESCE((SELECT MAX(id) FROM sys_tenant), 1));
+SELECT setval(pg_get_serial_sequence('sys_llm_vendor_config', 'id'), COALESCE((SELECT MAX(id) FROM sys_llm_vendor_config), 1));
+SELECT setval(pg_get_serial_sequence('sys_llm_billing_rule', 'id'), COALESCE((SELECT MAX(id) FROM sys_llm_billing_rule), 1));
+SELECT setval(pg_get_serial_sequence('sys_llm_api_key_config', 'id'), COALESCE((SELECT MAX(id) FROM sys_llm_api_key_config), 1));
+SELECT setval(pg_get_serial_sequence('sys_llm_model_config', 'id'), COALESCE((SELECT MAX(id) FROM sys_llm_model_config), 1));
+SELECT setval(pg_get_serial_sequence('sys_llm_usage_log', 'id'), COALESCE((SELECT MAX(id) FROM sys_llm_usage_log), 1));
