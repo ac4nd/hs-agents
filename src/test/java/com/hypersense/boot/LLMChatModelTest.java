@@ -17,17 +17,17 @@ import static org.junit.jupiter.api.Assertions.*;
  * LLM ChatModel 连通性与功能测试
  * <p>
  * 测试 LangChain4J OpenAiChatModel 与远程 LLM API 的集成。
- * 配置来源于 application-local.yml 中的 agent.llm 配置项。
+ * 配置来源于 application-dev.yml 中的 agent.llm 配置项。
  * <p>
  * 运行前确保：
- * 1. application-local.yml 中 agent.llm.openai.api-key 已配置有效的 API Key
+ * 1. application-dev.yml 中 agent.llm.openai.api-key 已配置有效的 API Key
  * 2. 网络可访问对应的 LLM API 端点
  *
  * @author test
  */
 class LLMChatModelTest {
 
-    // ========== 配置常量（通过环境变量注入，与 application-local.yml 保持一致） ==========
+    // ========== 配置常量（通过环境变量注入，与 application-dev.yml 保持一致） ==========
     private static final String ENDPOINT = System.getenv().getOrDefault("LLM_ENDPOINT", "https://open.bigmodel.cn/api/coding/paas/v4");
     private static final String API_KEY = System.getenv().getOrDefault("LLM_API_KEY", "");
     private static final String MODEL_NAME = System.getenv().getOrDefault("LLM_MODEL", "glm-4.7");

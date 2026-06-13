@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * <ul>
  *   <li>Node.js 已安装（node 可用）</li>
  *   <li>docx npm 包已全局安装（npm install -g docx）</li>
- *   <li>LLM API 可访问（使用 application-local.yml 中的配置）</li>
+ *   <li>LLM API 可访问（使用 application-dev.yml 中的配置）</li>
  * </ul>
  *
  * @author test
