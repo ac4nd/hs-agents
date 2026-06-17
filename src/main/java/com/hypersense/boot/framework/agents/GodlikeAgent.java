@@ -6,6 +6,7 @@ import com.hypersense.boot.framework.agents.engine.node.*;
 import com.hypersense.boot.framework.agents.engine.route.RouteAfterExecute;
 import com.hypersense.boot.framework.agents.engine.route.RouteAfterPlan;
 import com.hypersense.boot.framework.agents.enums.AgentEventType;
+import com.hypersense.boot.framework.agents.hitl.HitlGateChecker;
 import com.hypersense.boot.framework.agents.middleware.AgentMiddleware;
 import com.hypersense.boot.framework.agents.middleware.MiddlewarePipeline;
 import com.hypersense.boot.framework.agents.middleware.impl.LoggingMiddleware;
@@ -693,9 +694,11 @@ public class GodlikeAgent {
 
         private CompiledGraph<DeepAgentState> buildGraph(ChatModel model, MiddlewarePipeline pipeline,
                                                           SandboxManager sandboxManager) throws Exception {
-            // 创建节点
-            PlanNode planNode = new PlanNode(model);
-            ExecuteNode executeNode = new ExecuteNode(model);
+            // 创建节点（非 Spring 路径：使用禁用智能门控的 HitlGateChecker，避免误触发 LLM 中断）
+            AgentProperties defaultProps = new AgentProperties();
+            HitlGateChecker disabledGate = HitlGateChecker.disabled(model);
+            PlanNode planNode = new PlanNode(model, disabledGate, defaultProps);
+            ExecuteNode executeNode = new ExecuteNode(model, disabledGate);
             DelegateNode delegateNode = new DelegateNode(model, tools, subAgentDefinitions, sandboxManager);
             ToolNode toolNode = ToolNode.create(tools, toolRetryConfig);
             FinalizeNode finalizeNode = new FinalizeNode(model);

@@ -67,7 +67,7 @@ public class PostgresqlSaver extends AbstractCheckpointSaver {
 
     /** 查询某线程全部检查点（按 idx 排序） */
     private static final String SELECT_SQL = """
-            SELECT checkpoint_id, state, node_id, next_node_id, idx
+            SELECT checkpoint_id, state::text AS state, node_id, next_node_id, idx
               FROM agent_checkpoints
              WHERE thread_id = ?
              ORDER BY idx ASC
@@ -214,7 +214,10 @@ public class PostgresqlSaver extends AbstractCheckpointSaver {
      */
     private Checkpoint mapRowToCheckpoint(Map<String, Object> row) throws JsonProcessingException {
         String checkpointId = (String) row.get("checkpoint_id");
-        String stateJson = (String) row.get("state");
+        // PostgreSQL JDBC 对 jsonb 列默认返回 PGobject，SQL 已用 state::text 强制转为字符串；
+        // 这里再做一层防御性处理，避免驱动行为变化导致 ClassCastException
+        Object stateRaw = row.get("state");
+        String stateJson = stateRaw == null ? null : stateRaw.toString();
         String nodeId = (String) row.get("node_id");
         String nextNodeId = (String) row.get("next_node_id");
 

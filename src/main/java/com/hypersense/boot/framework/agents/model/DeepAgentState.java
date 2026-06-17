@@ -68,6 +68,17 @@ public class DeepAgentState extends AgentState {
     /** 序列化的 InterruptContext（JSON） */
     public static final String INTERRUPT_CONTEXT = "interrupt_context";
 
+    // ========== 智能 HITL Gate 专用通道 ==========
+
+    /** 是否触发智能中断（HitlGateChecker 判定需确认时置 true，路由器据此跳转 END） */
+    public static final String NEED_CONFIRMATION = "need_confirmation";
+
+    /** 智能中断原因（HitlDecision.reason） */
+    public static final String INTERRUPT_REASON = "interrupt_reason";
+
+    /** 智能中断严重度（low/medium/high） */
+    public static final String INTERRUPT_SEVERITY = "interrupt_severity";
+
     // ========== 长期记忆状态通道 ==========
 
     /** 当前用户 ID（用于记忆的租户+用户隔离） */
@@ -103,6 +114,10 @@ public class DeepAgentState extends AgentState {
             Map.entry(HUMAN_FEEDBACK, Channels.base((Supplier<String>) () -> "")),
             Map.entry(INTERRUPTED_NODE, Channels.base((Supplier<String>) () -> "")),
             Map.entry(INTERRUPT_CONTEXT, Channels.base((Supplier<String>) () -> "")),
+            // 智能 HITL Gate 通道
+            Map.entry(NEED_CONFIRMATION, Channels.base((Supplier<Boolean>) () -> false)),
+            Map.entry(INTERRUPT_REASON, Channels.base((Supplier<String>) () -> "")),
+            Map.entry(INTERRUPT_SEVERITY, Channels.base((Supplier<String>) () -> "")),
             // 长期记忆状态通道
             Map.entry(USER_ID, Channels.base((Supplier<Long>) () -> 0L)),
             Map.entry(TENANT_ID, Channels.base((Supplier<Long>) () -> 0L))
@@ -249,6 +264,27 @@ public class DeepAgentState extends AgentState {
      */
     public String interruptContext() {
         return this.<String>value(INTERRUPT_CONTEXT).orElse("");
+    }
+
+    /**
+     * 是否触发智能中断
+     */
+    public boolean needConfirmation() {
+        return this.<Boolean>value(NEED_CONFIRMATION).orElse(false);
+    }
+
+    /**
+     * 智能中断原因
+     */
+    public String interruptReason() {
+        return this.<String>value(INTERRUPT_REASON).orElse("");
+    }
+
+    /**
+     * 智能中断严重度
+     */
+    public String interruptSeverity() {
+        return this.<String>value(INTERRUPT_SEVERITY).orElse("");
     }
 
     // ========== 长期记忆便捷访问方法 ==========

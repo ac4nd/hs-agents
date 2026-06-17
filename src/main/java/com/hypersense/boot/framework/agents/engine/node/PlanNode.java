@@ -1,5 +1,12 @@
 package com.hypersense.boot.framework.agents.engine.node;
 
+import com.hypersense.boot.framework.agents.engine.SubAgentEventBus;
+import com.hypersense.boot.framework.agents.enums.AgentEventType;
+import com.hypersense.boot.framework.agents.config.AgentProperties;
+import com.hypersense.boot.framework.agents.hitl.DecisionPoint;
+import com.hypersense.boot.framework.agents.hitl.HitlDecision;
+import com.hypersense.boot.framework.agents.hitl.HitlGateChecker;
+import com.hypersense.boot.framework.agents.model.AgentEvent;
 import com.hypersense.boot.framework.agents.model.DeepAgentState;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import com.hypersense.boot.framework.agents.enums.TodoStatus;
@@ -16,6 +23,7 @@ import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -27,6 +35,14 @@ import java.util.stream.Collectors;
  * 调用 LLM 分析当前任务状态，生成或更新 TODO 计划。
  * 这是 DeepAgents「显式规划」能力的核心实现。
  * </p>
+ * <p>
+ * 流式事件协议：
+ * <ul>
+ *   <li>开始 → {@link AgentEventType#NODE_EXECUTION}</li>
+ *   <li>完成 → {@link AgentEventType#PLAN_CREATED}（data 带 todos）</li>
+ *   <li>智能判断需确认 → {@link AgentEventType#INTERRUPT}（data 带 HitlDecision）</li>
+ * </ul>
+ * </p>
  *
  * @author Claude
  * @since 2026/5/15
@@ -37,33 +53,115 @@ import java.util.stream.Collectors;
 public class PlanNode implements NodeAction<DeepAgentState> {
 
     private final ChatModel chatModel;
+    private final HitlGateChecker hitlGateChecker;
+    private final AgentProperties agentProperties;
 
     /** 连续解析失败的最大容忍次数，超过后将所有 PENDING TODO 标记为 FAILED 以打破循环 */
     private static final int MAX_PARSE_FAILURES = 3;
 
     private static final String PLAN_SYSTEM_PROMPT = """
-            你是一个任务规划专家。根据用户的指令和当前进度，制定清晰的执行计划。
+            你是任务规划专家。先判断用户指令的复杂度，再决定响应方式。
 
-            规则：
-            1. 将复杂任务分解为可独立执行的具体 TODO 项
-            2. 每个 TODO 项描述必须明确、可操作
-            3. 如果已有 TODO 列表，根据已完成项更新剩余计划
-            4. 按优先级排序 TODO 项
+            【必须走 TODO 计划的场景】满足任一即必须生成 TODO（不能 DIRECT_REPLY）：
+            1. 需要实时/外部信息：天气、新闻、股价、汇率、赛事比分、最新动态、当前时间相关的查询
+            2. 需要调用工具：网络搜索、文件读写、代码执行、数据库查询、API 调用
+            3. 需要多步骤协作、跨系统操作、生成产物（文件/代码/报告）
+            4. 用户明确要求"查"、"搜"、"获取"、"打开"、"生成"、"创建"等动作动词
+            对于上述场景，TODO 描述要明确包含工具使用意图，例如「使用网络搜索查询 X」。
 
-            重要：你的回复必须只包含 TODO 行，不要输出其他解释性文字。
-            每行严格使用以下格式：
-            TODO: [任务描述]
-            TODO: [任务描述]
-            ...
+            【可以直接 DIRECT_REPLY 的场景】（仅限以下情形）：
+            - 问候、闲聊、身份介绍（"你好"、"你是谁"、"谢谢"）
+            - 用户已有信息范围内的纯知识问答（"什么是闭包"、"解释 Transformer 原理"）
+            - 对历史对话的澄清/确认（"我刚才说的是…"、"明白了"）
+
+            【输出格式】严格二选一，不要任何额外解释、markdown 包裹：
+            - DIRECT_REPLY: <自然回复正文>
+            - TODO: <任务描述>（可多行）
+
+            【示例 1】用户指令="你好"
+            输出：DIRECT_REPLY: 你好！很高兴见到你。有什么我可以帮你的吗？
+
+            【示例 2】用户指令="解释一下什么是闭包"
+            输出：DIRECT_REPLY: 闭包是指……（自然语言解释）
+
+            【示例 3】用户指令="查询福州今天的天气"
+            输出：
+            TODO: 使用网络搜索工具查询福州今日天气
+            TODO: 汇总天气信息回复用户
+
+            【示例 4】用户指令="最新 AI 新闻有哪些"
+            输出：
+            TODO: 使用网络搜索工具查询最新 AI 新闻
+            TODO: 整理新闻要点回复用户
+
+            【示例 5】用户指令="帮我生成一个 Python 数据清洗脚本并保存到 data_clean.py"
+            输出：
+            TODO: 设计数据清洗逻辑
+            TODO: 编写 Python 脚本并保存为 data_clean.py
             """;
 
     @Override
     public Map<String, Object> apply(DeepAgentState state) {
         log.info("PlanNode: 开始规划任务");
+        emit(AgentEventType.NODE_EXECUTION, "规划节点开始", Map.of("node", "plan"));
+
+        // 迭代上限保护：超过配置的 max-iterations 强制 finalize，避免 plan↔execute 空转
+        int iteration = state.iterationCount();
+        Integer maxIterCfg = agentProperties.getDeep().getMaxIterations();
+        int maxIter = maxIterCfg != null && maxIterCfg > 0 ? maxIterCfg : 25;
+        if (iteration >= maxIter) {
+            log.warn("PlanNode: 迭代次数已达上限 {}，强制结束（保留现有 todos 状态进入 finalize）", maxIter);
+            String msg = String.format("已达迭代上限（%d 次），任务中止以防无限循环。", maxIter);
+            List<TodoItem> frozenTodos = state.todos().stream()
+                    .map(t -> (t.getStatus() == TodoStatus.PENDING || t.getStatus() == TodoStatus.IN_PROGRESS)
+                            ? TodoItem.builder().id(t.getId()).description(t.getDescription())
+                            .status(TodoStatus.FAILED).result("迭代超限未执行")
+                            .assignedAgent(t.getAssignedAgent()).updatedAt(LocalDateTime.now()).build()
+                            : t)
+                    .toList();
+            return Map.of(
+                    DeepAgentState.TODOS, frozenTodos,
+                    DeepAgentState.MESSAGES, AiMessage.from(msg)
+            );
+        }
+
+        // 短路：已存在 todos 且全部已结束（COMPLETED/FAILED）→ 不再调用 LLM 重新规划，
+        // 保留原状态让 RouteAfterPlan 路由到 finalize，避免无谓的 LLM 调用和描述漂移
+        List<TodoItem> existingTodos = state.todos();
+        if (!existingTodos.isEmpty()) {
+            boolean allDone = existingTodos.stream().allMatch(t ->
+                    t.getStatus() == TodoStatus.COMPLETED || t.getStatus() == TodoStatus.FAILED);
+            if (allDone) {
+                log.info("PlanNode: 所有 TODO 已结束，跳过 LLM 重新规划，直接进入 finalize");
+                return Map.of(
+                        DeepAgentState.TODOS, existingTodos,
+                        DeepAgentState.MESSAGES, AiMessage.from("所有任务已完成")
+                );
+            }
+            // 已有 todos 且至少一个处于 PENDING/IN_PROGRESS 时，跳过 LLM 重新规划，
+            // 保留原 todos 让 RouteAfterPlan 路由到 execute 继续推进；
+            // 避免 LLM 描述漂移（如"搜索"→"查询"）导致 findExistingStatus 精确匹配失败，
+            // 已 COMPLETED 的 TODO 被当作新 PENDING 重新生成 → 死循环
+            boolean hasPending = existingTodos.stream().anyMatch(t ->
+                    t.getStatus() == TodoStatus.PENDING || t.getStatus() == TodoStatus.IN_PROGRESS);
+            if (hasPending) {
+                log.info("PlanNode: 已有 {} 个 TODO 含未完成项，跳过 LLM 重新规划，继续推进执行",
+                        existingTodos.size());
+                emit(AgentEventType.NODE_EXECUTION, "继续执行现有计划",
+                        Map.of("node", "plan", "todos", existingTodos));
+                return Map.of(
+                        DeepAgentState.TODOS, existingTodos,
+                        DeepAgentState.MESSAGES, AiMessage.from("继续执行现有计划")
+                );
+            }
+        }
 
         // 构建提示上下文
-        String instructions = state.instructions();
-        List<TodoItem> existingTodos = state.todos();
+        // MemoryMiddleware.before 通过 ThreadLocal 旁路注入记忆增强后的 instructions
+        // （LangGraph4j 节点执行期间 state.data() 不可修改，无法直接 put）
+        // ThreadLocal 清理由 wrapWithMemoryMiddleware 的 finally 块统一负责，避免节点异常时泄漏
+        String memoryEnhanced = com.hypersense.boot.framework.agents.memory.MemoryMiddleware.ENHANCED_INSTRUCTIONS.get();
+        String instructions = memoryEnhanced != null ? memoryEnhanced : state.instructions();
         String existingSummary = existingTodos.isEmpty()
                 ? "（暂无计划）"
                 : existingTodos.stream()
@@ -89,6 +187,21 @@ public class PlanNode implements NodeAction<DeepAgentState> {
         String planText = response.aiMessage().text();
         log.debug("PlanNode: LLM 规划结果\n{}", planText);
 
+        // 短路：LLM 直接回复简单对话（DIRECT_REPLY: 前缀），跳过 TODO 计划
+        String directReply = parseDirectReply(planText);
+        if (directReply != null) {
+            log.info("PlanNode: 检测到简单对话，直接回复用户（不进入 TODO 流程）");
+            Map<String, Object> directData = new HashMap<>();
+            directData.put("finalResponse", directReply);
+            emit(AgentEventType.FINAL_RESPONSE, "已回复用户", directData);
+
+            Map<String, Object> result = new HashMap<>();
+            result.put(DeepAgentState.TODOS, List.of());
+            result.put(DeepAgentState.FINAL_RESPONSE, directReply);
+            result.put(DeepAgentState.MESSAGES, AiMessage.from(directReply));
+            return result;
+        }
+
         // 解析 TODO 列表
         List<TodoItem> todos = parseTodos(planText, existingTodos);
 
@@ -101,7 +214,15 @@ public class PlanNode implements NodeAction<DeepAgentState> {
                         planText.substring(0, Math.min(200, planText.length())));
 
                 // 连续失败达到上限，强制将所有 PENDING TODO 标记为 FAILED（打破无限循环）
-                int failCount = state.<Integer>value(DeepAgentState.ITERATION_COUNT).orElse(0);
+                // 类型守卫：若 ITERATION_COUNT 通道被污染为非 Integer（如 checkpoint 反序列化降级），
+                // value() 会抛 ClassCastException 让死循环保护失效。捕获后回退为 0，触发强制终止路径。
+                int failCount;
+                try {
+                    failCount = state.<Integer>value(DeepAgentState.ITERATION_COUNT).orElse(0);
+                } catch (ClassCastException cce) {
+                    log.warn("PlanNode: ITERATION_COUNT 类型异常，回退为 0: {}", cce.getMessage());
+                    failCount = 0;
+                }
                 if (failCount >= MAX_PARSE_FAILURES) {
                     log.error("PlanNode: 连续 {} 次规划未能产生有效 TODO，强制终止", failCount);
                     List<TodoItem> failedTodos = existingTodos.stream()
@@ -119,10 +240,56 @@ public class PlanNode implements NodeAction<DeepAgentState> {
             }
         }
 
-        return Map.of(
-                DeepAgentState.TODOS, todos,
-                DeepAgentState.MESSAGES, AiMessage.from("规划完成，共 " + todos.size() + " 个任务项")
-        );
+        // 流式推送 PLAN_CREATED（带 todos）
+        emit(AgentEventType.PLAN_CREATED, "规划完成，共 " + todos.size() + " 个任务项", Map.of("todos", todos));
+
+        // 智能 HITL Gate 判断
+        HitlDecision decision = hitlGateChecker.check(state, DecisionPoint.PLAN_COMPLETED);
+        Map<String, Object> result = new HashMap<>();
+        result.put(DeepAgentState.TODOS, todos);
+        result.put(DeepAgentState.MESSAGES, AiMessage.from("规划完成，共 " + todos.size() + " 个任务项"));
+
+        if (decision.isNeedConfirm()) {
+            // 触发智能中断：emit INTERRUPT，置 NEED_CONFIRMATION=true
+            Map<String, Object> gateData = new HashMap<>();
+            gateData.put("decisionPoint", DecisionPoint.PLAN_COMPLETED.getValue());
+            gateData.put("severity", decision.getSeverity());
+            gateData.put("dimension", decision.getDimension());
+            gateData.put("reason", decision.getReason());
+            gateData.put("todos", todos);
+            emit(AgentEventType.INTERRUPT, "规划需用户确认: " + decision.getReason(), gateData);
+
+            result.put(DeepAgentState.NEED_CONFIRMATION, true);
+            result.put(DeepAgentState.INTERRUPT_REASON, decision.getReason());
+            result.put(DeepAgentState.INTERRUPT_SEVERITY, decision.getSeverity());
+            log.info("PlanNode: 智能门控触发中断, severity={}, reason={}",
+                    decision.getSeverity(), decision.getReason());
+        }
+
+        return result;
+    }
+
+    /**
+     * 识别 DIRECT_REPLY: 前缀。匹配时返回去掉前缀的回复；否则返回 null。
+     */
+    private String parseDirectReply(String planText) {
+        if (planText == null) return null;
+        String trimmed = planText.trim();
+        // 大小写不敏感 + 容忍全角冒号
+        String prefix = "DIRECT_REPLY";
+        if (trimmed.regionMatches(true, 0, prefix, 0, prefix.length())) {
+            int colonIdx = trimmed.indexOf(':', prefix.length());
+            if (colonIdx < 0) {
+                colonIdx = trimmed.indexOf('：', prefix.length());
+            }
+            if (colonIdx >= 0) {
+                String reply = trimmed.substring(colonIdx + 1).trim();
+                if (!reply.isBlank()) {
+                    return reply;
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -171,5 +338,20 @@ public class PlanNode implements NodeAction<DeepAgentState> {
                 .map(TodoItem::getStatus)
                 .findFirst()
                 .orElse(TodoStatus.PENDING);
+    }
+
+    /**
+     * 通过 SubAgentEventBus 推送事件（线程本地，由 AgentServiceImpl 设置的消费者接收）
+     */
+    private void emit(AgentEventType type, String message, Map<String, Object> data) {
+        var consumer = SubAgentEventBus.get();
+        if (consumer == null) return;
+        AgentEvent event = AgentEvent.builder()
+                .type(type)
+                .message(message)
+                .data(data)
+                .timestamp(System.currentTimeMillis())
+                .build();
+        consumer.accept(event);
     }
 }

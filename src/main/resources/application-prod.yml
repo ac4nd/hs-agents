@@ -86,7 +86,6 @@ security:
     - /api/v1/auth/refresh-token
     - /api/v1/wxma/auth/**
     - /api/v1/logs/**
-    - /api/v1/agent/**
   unsecured-urls:
     - ${springdoc.swagger-ui.path}
     - /doc.html

@@ -89,4 +89,18 @@ public interface AgentService {
      * @return 中断上下文（包含节点名、当前 TODO、摘要等）
      */
     InterruptContext getInterruptContext(String sessionId);
+
+    /**
+     * 查询当前用户的所有会话列表
+     *
+     * @return 会话列表
+     */
+    java.util.List<AgentSessionVO> listSessions();
+
+    /**
+     * 删除会话
+     *
+     * @param sessionId 会话 ID
+     */
+    void deleteSession(String sessionId);
 }

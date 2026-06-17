@@ -2,7 +2,10 @@ package com.hypersense.boot.framework.agents.engine.node;
 
 import com.hypersense.boot.framework.agents.config.AgentProperties;
 import com.hypersense.boot.framework.agents.config.ToolRetryConfig;
+import com.hypersense.boot.framework.agents.engine.SubAgentEventBus;
+import com.hypersense.boot.framework.agents.enums.AgentEventType;
 import com.hypersense.boot.framework.agents.enums.TodoStatus;
+import com.hypersense.boot.framework.agents.model.AgentEvent;
 import com.hypersense.boot.framework.agents.model.DeepAgentState;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import com.hypersense.boot.framework.agents.tool.ToolProvider;
@@ -88,6 +91,10 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         TodoItem todo = currentTodoOpt.get();
         log.info("ToolNode: 为 TODO [{}] 查找工具", todo.getDescription());
 
+        // 推送工具调用开始事件，让前端看到进度（而非静默执行）
+        emit(AgentEventType.TOOL_CALL, "调用工具: " + todo.getDescription(),
+                Map.of("todo", todo, "tools", toolProviders.stream().map(ToolProvider::name).toList()));
+
         // 根据 enabledTools 过滤工具执行
         List<String> enabledTools = state.enabledTools();
         Map<String, Object> toolResults = new HashMap<>();
@@ -97,6 +104,11 @@ public class ToolNode implements NodeAction<DeepAgentState> {
             // 启用了工具过滤时，仅执行白名单中的工具
             if (!enabledTools.isEmpty() && !enabledTools.contains(tool.name())) {
                 log.debug("ToolNode: 工具 [{}] 未启用，跳过", tool.name());
+                continue;
+            }
+            // 智能过滤：根据 TODO 描述判断是否需要该工具，避免 FileReadTool/FileWriteTool 无参时被误触发
+            if (!shouldInvoke(tool, todo.getDescription())) {
+                log.info("ToolNode: 工具 [{}] 与当前 TODO 不匹配，跳过", tool.name());
                 continue;
             }
             try {
@@ -130,25 +142,40 @@ public class ToolNode implements NodeAction<DeepAgentState> {
             }
         }
 
+        // 若所有工具都被过滤，记录提示（避免 toolResults 空时 final 报错）
+        if (toolResults.isEmpty()) {
+            log.warn("ToolNode: 无工具匹配 TODO [{}]，可能应由 direct 策略处理", todo.getDescription());
+        }
+
         // 更新 TODO 状态（检查是否有工具执行失败）
         boolean hasFailure = toolResults.values().stream()
                 .anyMatch(v -> v instanceof String s && s.startsWith("执行失败:"));
         TodoStatus resultStatus = hasFailure ? TodoStatus.FAILED : TodoStatus.COMPLETED;
-        String resultPrefix = hasFailure ? "工具调用部分失败" : "工具调用完成";
+
+        // 提取可读摘要作为 todo.result，让前端展示和 FinalizeNode 引用
+        String readableResult = extractReadableResult(toolResults);
 
         List<TodoItem> updatedTodos = new ArrayList<>(state.todos());
+        TodoItem updatedTodo = null;
         for (int i = 0; i < updatedTodos.size(); i++) {
             if (updatedTodos.get(i).getId().equals(todo.getId())) {
-                updatedTodos.set(i, TodoItem.builder()
+                updatedTodo = TodoItem.builder()
                         .id(todo.getId())
                         .description(todo.getDescription())
                         .status(resultStatus)
-                        .result(resultPrefix + ": " + toolResults.keySet())
+                        .result(readableResult)
                         .assignedAgent(todo.getAssignedAgent())
                         .updatedAt(LocalDateTime.now())
-                        .build());
+                        .build();
+                updatedTodos.set(i, updatedTodo);
                 break;
             }
+        }
+
+        // 推送 TODO 完成事件（携带工具结果），让前端展示进度而非静默迭代
+        if (updatedTodo != null) {
+            emit(AgentEventType.TODO_COMPLETED, "已完成: " + todo.getDescription(),
+                    Map.of("todo", updatedTodo, "toolResults", toolResults));
         }
 
         return Map.of(
@@ -157,6 +184,118 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                 DeepAgentState.MESSAGES, AiMessage.from(
                         String.format("工具调用完成: %s", toolResults.keySet()))
         );
+    }
+
+    /**
+     * 通过 SubAgentEventBus 推送事件
+     */
+    private void emit(AgentEventType type, String message, Map<String, Object> data) {
+        var consumer = SubAgentEventBus.get();
+        if (consumer == null) return;
+        AgentEvent event = AgentEvent.builder()
+                .type(type)
+                .message(message)
+                .data(data)
+                .timestamp(System.currentTimeMillis())
+                .build();
+        consumer.accept(event);
+    }
+
+    /**
+     * 从工具返回结果中提取可读摘要，用于前端展示和 FinalizeNode 引用。     * <p>
+     * 支持的返回结构：
+     * <ul>
+     *   <li>internet_search: {success, query, resultCount, results: [{title, url, content}]}</li>
+     *   <li>其他工具：尝试 toString 兜底</li>
+     * </ul>
+     * </p>
+     */
+    @SuppressWarnings("unchecked")
+    private String extractReadableResult(Map<String, Object> toolResults) {
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, Object> entry : toolResults.entrySet()) {
+            String toolName = entry.getKey();
+            Object result = entry.getValue();
+            if (result instanceof String s && s.startsWith("执行失败:")) {
+                sb.append("[").append(toolName).append("] ").append(s).append("\n");
+                continue;
+            }
+            if (result instanceof Map<?, ?> resultMap) {
+                // internet_search 结构
+                Object resultsObj = resultMap.get("results");
+                Object queryObj = resultMap.get("query");
+                if (resultsObj instanceof List<?> list && !list.isEmpty()) {
+                    if (sb.length() > 0) sb.append("\n");
+                    sb.append("搜索关键词: ").append(queryObj != null ? queryObj : "N/A").append("\n");
+                    int idx = 1;
+                    for (Object item : list) {
+                        if (!(item instanceof Map<?, ?>)) continue;
+                        Map<?, ?> m = (Map<?, ?>) item;
+                        String title = stringOrEmpty(m.get("title"));
+                        String content = stringOrEmpty(m.get("content"));
+                        String url = stringOrEmpty(m.get("url"));
+                        sb.append(idx++).append(". ").append(title);
+                        if (!content.isBlank()) sb.append(" — ").append(content);
+                        if (!url.isBlank()) sb.append("（").append(url).append("）");
+                        sb.append("\n");
+                        if (idx > 5) break; // 最多 5 条避免过长
+                    }
+                    continue;
+                }
+                // 其他 Map 结果：优先取 message/success 字段，否则整体 toString
+                Object msg = resultMap.get("message");
+                sb.append("[").append(toolName).append("] ")
+                        .append(msg != null ? msg : resultMap).append("\n");
+                continue;
+            }
+            sb.append("[").append(toolName).append("] ").append(result).append("\n");
+        }
+        return sb.toString().trim();
+    }
+
+    /**
+     * null 安全的字符串提取：null/非 String 值都返回空串。
+     */
+    private String stringOrEmpty(Object v) {
+        return v != null ? String.valueOf(v) : "";
+    }
+
+    /**
+     * 根据 TODO 描述判断是否应该调用该工具，避免无参数工具被无脑遍历触发。
+     * <p>
+     * 规则：
+     * <ul>
+     *   <li>internet_search: TODO 含搜索/查询/查/获取/找/最新/实时/今天/当前/天气/新闻/股价/汇率 等关键词</li>
+     *   <li>file_read: TODO 含"读取/打开/read" 等关键词</li>
+     *   <li>file_write: TODO 含"写入/保存/write/创建文件" 等关键词</li>
+     *   <li>sandbox_execute: TODO 含"执行/运行代码/sandbox"</li>
+     *   <li>其他工具：默认 true（向后兼容）</li>
+     * </ul>
+     * </p>
+     */
+    private boolean shouldInvoke(ToolProvider tool, String todoDescription) {
+        if (todoDescription == null || todoDescription.isBlank()) return true;
+        String desc = todoDescription.toLowerCase();
+        String name = tool.name();
+        switch (name) {
+            case "internet_search":
+                return desc.matches(".*\\b(search|query|lookup|fetch|news|weather|price|rate|latest)\\b.*")
+                        || desc.contains("搜索") || desc.contains("查询") || desc.contains("获取")
+                        || desc.contains("查找") || desc.contains("最新") || desc.contains("实时")
+                        || desc.contains("今天") || desc.contains("当前") || desc.contains("天气")
+                        || desc.contains("新闻") || desc.contains("股价") || desc.contains("汇率");
+            case "file_read":
+                return desc.contains("读取文件") || desc.contains("打开文件") || desc.contains("read")
+                        || desc.contains("查看文件") || desc.contains("读取") && desc.contains("文件");
+            case "file_write":
+                return desc.contains("写入文件") || desc.contains("保存文件") || desc.contains("write")
+                        || desc.contains("创建文件") || (desc.contains("写入") && desc.contains("文件"))
+                        || (desc.contains("保存") && desc.contains("文件"));
+            case "sandbox_execute":
+                return desc.contains("执行") || desc.contains("运行代码") || desc.contains("sandbox");
+            default:
+                return true;
+        }
     }
 
     // ========== 重试逻辑 ==========

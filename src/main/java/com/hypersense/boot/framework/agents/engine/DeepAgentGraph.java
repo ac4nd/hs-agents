@@ -213,9 +213,15 @@ public class DeepAgentGraph {
     private NodeAction<DeepAgentState> wrapWithMemoryMiddleware(
             String nodeName, NodeAction<DeepAgentState> delegate, MemoryMiddleware mw) {
         return state -> {
-            mw.before(nodeName, state);
-            Map<String, Object> output = delegate.apply(state);
-            return mw.after(nodeName, state, output);
+            // before() 通过 ThreadLocal 旁路传递记忆增强（state.data() 节点执行期间不可修改），
+            // 必须用 try-finally 保证 ThreadLocal 清理，避免节点抛异常时线程池复用导致串话。
+            try {
+                mw.before(nodeName, state);
+                Map<String, Object> output = delegate.apply(state);
+                return mw.after(nodeName, state, output);
+            } finally {
+                com.hypersense.boot.framework.agents.memory.MemoryMiddleware.ENHANCED_INSTRUCTIONS.remove();
+            }
         };
     }
 

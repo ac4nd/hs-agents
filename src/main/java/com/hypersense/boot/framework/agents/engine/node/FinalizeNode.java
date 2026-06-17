@@ -1,5 +1,8 @@
 package com.hypersense.boot.framework.agents.engine.node;
 
+import com.hypersense.boot.framework.agents.engine.SubAgentEventBus;
+import com.hypersense.boot.framework.agents.enums.AgentEventType;
+import com.hypersense.boot.framework.agents.model.AgentEvent;
 import com.hypersense.boot.framework.agents.model.DeepAgentState;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import dev.langchain4j.data.message.AiMessage;
@@ -15,12 +18,14 @@ import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 /**
  * 最终汇总节点
  * <p>
  * 汇总所有 TODO 执行结果，调用 LLM 生成最终响应。
+ * 完成后推送 {@link AgentEventType#FINAL_RESPONSE} 事件（data 带 finalResponse 文本）。
  * </p>
  *
  * @author Claude
@@ -45,6 +50,17 @@ public class FinalizeNode implements NodeAction<DeepAgentState> {
     @Override
     public Map<String, Object> apply(DeepAgentState state) {
         log.info("FinalizeNode: 开始汇总结果");
+
+        // 短路：PlanNode 已直接回复（如简单问候），跳过 LLM 重新汇总，避免重复输出
+        Optional<String> existing = state.finalResponse();
+        if (existing.isPresent() && !existing.get().isBlank()) {
+            String direct = existing.get();
+            log.info("FinalizeNode: 复用 PlanNode 的直接回复（跳过汇总）");
+            return Map.of(
+                    DeepAgentState.FINAL_RESPONSE, direct,
+                    DeepAgentState.MESSAGES, AiMessage.from(direct)
+            );
+        }
 
         List<TodoItem> todos = state.todos();
         String todoSummary = todos.stream()
@@ -89,9 +105,22 @@ public class FinalizeNode implements NodeAction<DeepAgentState> {
             log.error("FinalizeNode: 报告生成异常", e);
         }
 
+        // 流式推送 FINAL_RESPONSE（带 finalResponse 文本）
+        var consumer = SubAgentEventBus.get();
+        if (consumer != null) {
+            AgentEvent event = AgentEvent.builder()
+                    .type(AgentEventType.FINAL_RESPONSE)
+                    .message("任务全部完成")
+                    .data(Map.of("finalResponse", finalResponse))
+                    .timestamp(System.currentTimeMillis())
+                    .build();
+            consumer.accept(event);
+        }
+
         return Map.of(
                 DeepAgentState.FINAL_RESPONSE, finalResponse,
                 DeepAgentState.MESSAGES, AiMessage.from("任务全部完成。\n\n" + finalResponse)
         );
     }
 }
+

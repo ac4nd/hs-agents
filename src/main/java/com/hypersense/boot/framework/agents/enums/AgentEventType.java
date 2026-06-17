@@ -1,9 +1,14 @@
 package com.hypersense.boot.framework.agents.enums;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
 import lombok.Getter;
 
 /**
  * Agent 事件类型枚举（用于 SSE 推送）
+ * <p>
+ * JSON 序列化使用 {@link #value}（小写字符串），与前端事件路由保持一致。
+ * </p>
  *
  * @author Claude
  * @since 2026/5/15
@@ -48,4 +53,27 @@ public enum AgentEventType {
     AgentEventType(String value) {
         this.value = value;
     }
+
+    /**
+     * JSON 序列化：输出小写 value（如 "plan_created"），匹配前端 switch-case。
+     */
+    @JsonValue
+    public String getValue() {
+        return value;
+    }
+
+    /**
+     * JSON 反序列化：兼容 value 或 name()。
+     */
+    @JsonCreator
+    public static AgentEventType fromValue(String raw) {
+        if (raw == null) return null;
+        for (AgentEventType t : values()) {
+            if (t.value.equalsIgnoreCase(raw) || t.name().equalsIgnoreCase(raw)) {
+                return t;
+            }
+        }
+        return null;
+    }
 }
+

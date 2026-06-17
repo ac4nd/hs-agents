@@ -12,6 +12,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -188,8 +189,11 @@ public class MemoryService {
 
     private String extractFacts(String conversationText) {
         try {
+            // 注意：百炼 qwen-flash 等模型要求 messages 至少含一条 user 消息，
+            // 仅传 SystemMessage 会触发 400 / code=1214 非法 messages 错误。
             ChatResponse response = chatModel.chat(
-                    SystemMessage.from(FACT_EXTRACTION_PROMPT + conversationText)
+                    SystemMessage.from(FACT_EXTRACTION_PROMPT),
+                    UserMessage.from("请从以下对话中提取可长期保存的用户事实：\n\n" + conversationText)
             );
             return response.aiMessage().text();
         } catch (Exception e) {
@@ -200,25 +204,70 @@ public class MemoryService {
 
     private String formatConversation(List<ChatMessage> messages) {
         StringBuilder sb = new StringBuilder();
-        for (ChatMessage msg : messages) {
+        // 注意：用 Object 遍历避免 for-each 在循环开始时强转为 ChatMessage 导致 ClassCastException。
+        // 实际元素可能是 LinkedHashMap（checkpoint 反序列化降级），由下方 instanceof 分支处理。
+        for (Object obj : messages) {
             String role;
             String text;
-            if (msg instanceof UserMessage um) {
+            if (obj instanceof UserMessage um) {
                 role = "User";
                 text = um.singleText();
-            } else if (msg instanceof SystemMessage sm) {
+            } else if (obj instanceof SystemMessage sm) {
                 role = "System";
                 text = sm.text();
-            } else if (msg instanceof AiMessage ai) {
+            } else if (obj instanceof AiMessage ai) {
                 role = "Assistant";
                 text = ai.text();
+            } else if (obj instanceof Map<?, ?> map) {
+                // Jackson 反序列化降级：按 LangChain4j 序列化结构提取
+                role = mapToRole(map);
+                text = mapToText(map);
             } else {
                 role = "Unknown";
-                text = msg.toString();
+                text = obj != null ? obj.toString() : "";
             }
             sb.append(role).append(": ").append(text != null ? text : "").append("\n");
         }
         return sb.toString();
+    }
+
+    /**
+     * 从 Jackson 反序列化后的 LinkedHashMap 中提取角色名。
+     * LangChain4j 序列化结构：{"type":"userMessage"/"aiMessage"/"systemMessage", ...} 或 {"role":"user", ...}
+     */
+    private String mapToRole(Map<?, ?> map) {
+        Object type = map.get("type");
+        if (type != null) {
+            String s = type.toString().toLowerCase();
+            if (s.contains("user")) return "User";
+            if (s.contains("ai") || s.contains("assistant")) return "Assistant";
+            if (s.contains("system")) return "System";
+        }
+        Object role = map.get("role");
+        if (role != null) return role.toString();
+        return "Unknown";
+    }
+
+    /**
+     * 从 Jackson 反序列化后的 LinkedHashMap 中提取文本内容。
+     * 兼容字段：text / contents / content / singleText。
+     */
+    @SuppressWarnings("unchecked")
+    private String mapToText(Map<?, ?> map) {
+        for (String key : new String[]{"text", "contents", "content"}) {
+            Object v = map.get(key);
+            if (v instanceof CharSequence cs) return cs.toString();
+            if (v instanceof List<?> list && !list.isEmpty()) {
+                // contents 可能是 [{text: "..."}] 结构
+                Object first = list.get(0);
+                if (first instanceof Map<?, ?> m) {
+                    Object t = m.get("text");
+                    if (t != null) return t.toString();
+                }
+                return first.toString();
+            }
+        }
+        return "";
     }
 
     private List<ExtractedFact> parseFacts(String extractionResult) {

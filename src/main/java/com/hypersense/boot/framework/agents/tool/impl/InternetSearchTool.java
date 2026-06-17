@@ -136,9 +136,42 @@ public class InternetSearchTool implements ToolProvider {
         if (query != null && !query.toString().isBlank()) {
             return query.toString();
         }
-        // 兼容：从 todo_description 取关键词
+        // 兼容：从 todo_description 取关键词并净化
         Object todoDesc = params.get("todo_description");
-        return todoDesc != null ? todoDesc.toString() : null;
+        return todoDesc != null ? sanitizeQuery(todoDesc.toString()) : null;
+    }
+
+    /**
+     * 净化 TODO 描述为搜索关键词：
+     * <ul>
+     *   <li>去除常见动词前缀："使用网络搜索工具"、"查询"、"获取" 等</li>
+     *   <li>去除"回复用户/汇总/整理"等明显不属于搜索关键词的尾部</li>
+     *   <li>保留地名、主体对象、限定词</li>
+     * </ul>
+     * <p>例：「使用网络搜索工具查询福州今日天气」→「福州今日天气」</p>
+     */
+    private String sanitizeQuery(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        // 循环去除开头的所有动词短语前缀（直到无匹配），兼容"使用网络搜索工具查询..."等组合前缀
+        String[] prefixes = {"使用网络搜索工具", "使用网络搜索", "使用搜索工具",
+                "网络搜索工具", "网络搜索", "搜索工具", "互联网搜索", "联网搜索",
+                "使用工具", "通过工具",
+                "帮我", "请", "使用", "用",
+                "搜索", "查询", "获取", "查找", "找", "查"};
+        boolean changed = true;
+        while (changed) {
+            changed = false;
+            for (String p : prefixes) {
+                if (s.length() > p.length() && s.startsWith(p)) {
+                    s = s.substring(p.length()).trim();
+                    changed = true;
+                }
+            }
+        }
+        // 去除明显的"非搜索"尾部
+        s = s.replaceAll("(整理|汇总|总结|回复用户|回复|并.*$|以.*$).*$", "").trim();
+        return s.isBlank() ? raw.trim() : s;
     }
 
     /**

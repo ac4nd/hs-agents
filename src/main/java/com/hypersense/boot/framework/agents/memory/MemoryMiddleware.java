@@ -21,6 +21,16 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class MemoryMiddleware implements AgentMiddleware {
 
+    /**
+     * 跨中间件→节点传递增强后的 instructions。
+     * <p>
+     * LangGraph4j 节点执行期间 {@code state.data()} 返回 unmodifiable 视图，
+     * 直接 put 会抛 UnsupportedOperationException。改用 ThreadLocal 旁路传递，
+     * 由 {@code PlanNode} 在 apply 入口读取并合并到 prompt。
+     * </p>
+     */
+    public static final ThreadLocal<String> ENHANCED_INSTRUCTIONS = new ThreadLocal<>();
+
     private final MemoryService memoryService;
 
     @Override
@@ -55,8 +65,10 @@ public class MemoryMiddleware implements AgentMiddleware {
                     + memoryService.getMemoryMarker() + "\n"
                     + memoryService.formatMemoryContext(memories);
 
-            state.data().put(DeepAgentState.INSTRUCTIONS, enhancedInstructions);
-            log.info("MemoryMiddleware: 注入 {} 条记忆到 plan 节点", memories.size());
+            // 不能直接 state.data().put() — LangGraph4j 节点执行期间 data() 返回不可修改视图。
+            // 改为 ThreadLocal 传递，由 PlanNode 读取合并。
+            ENHANCED_INSTRUCTIONS.set(enhancedInstructions);
+            log.info("MemoryMiddleware: 注入 {} 条记忆到 plan 节点（ThreadLocal）", memories.size());
         } catch (Exception e) {
             log.error("MemoryMiddleware: 记忆注入失败", e);
         }

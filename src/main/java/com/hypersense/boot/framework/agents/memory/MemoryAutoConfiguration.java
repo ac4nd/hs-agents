@@ -35,17 +35,26 @@ import org.springframework.jdbc.core.JdbcTemplate;
 public class MemoryAutoConfiguration {
 
     /**
-     * 智谱 Embedding 客户端（RestTemplate 直调，避免 zai-sdk Jackson 版本冲突）
+     * OpenAI 兼容 Embedding 客户端（RestTemplate 直调，支持智谱/百炼/OpenAI 等）
+     * <p>
+     * 根据 {@code agent.llm.embedding-vendor} 选择 vendors Map 中对应厂商。
+     * Embedding 模型名优先取 vendor 的 embedding-model，回退到 memory.embedding-model。
+     * </p>
      */
     @Bean("memoryEmbeddingClient")
     @ConditionalOnProperty(prefix = "agent.memory", name = "enabled", havingValue = "true")
     public ZhipuEmbeddingClient memoryEmbeddingClient(AgentProperties agentProperties) {
+        AgentProperties.LlmConfig llm = agentProperties.getLlm();
+        AgentProperties.VendorConfig vendor = llm.resolveVendor(llm.getEmbeddingVendor());
         AgentProperties.MemoryConfig memConfig = agentProperties.getMemory();
-        String apiKey = agentProperties.getLlm().getOpenai().getApiKey();
-        String endpoint = agentProperties.getLlm().getOpenai().getEndpoint();
-        log.info("MemoryAutoConfiguration: 创建 Embedding 客户端, endpoint={}, model={}",
-                endpoint, memConfig.getEmbeddingModel());
-        return new ZhipuEmbeddingClient(endpoint, apiKey, memConfig.getEmbeddingModel());
+
+        String model = (vendor.getEmbeddingModel() != null && !vendor.getEmbeddingModel().isBlank())
+                ? vendor.getEmbeddingModel()
+                : memConfig.getEmbeddingModel();
+
+        log.info("MemoryAutoConfiguration: 创建 Embedding 客户端, vendor={}, endpoint={}, model={}",
+                llm.getEmbeddingVendor(), vendor.getEndpoint(), model);
+        return new ZhipuEmbeddingClient(vendor.getEndpoint(), vendor.getApiKey(), model);
     }
 
     /**

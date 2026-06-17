@@ -5,6 +5,7 @@ import com.hypersense.boot.framework.agents.model.DeepAgentState;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.action.EdgeAction;
+import org.bsc.langgraph4j.StateGraph;
 import org.springframework.stereotype.Component;
 
 import java.util.Optional;
@@ -13,6 +14,7 @@ import java.util.Optional;
  * 执行后路由
  * <p>
  * 根据当前 TODO 的执行策略决定下一步：
+ * - 智能 HITL 触发 → END（由 streamExecute 检测 NEED_CONFIRMATION 触发中断）
  * - delegate → 转到委派节点
  * - tool → 转到工具调用节点
  * - completed/other → 回到规划节点更新进度
@@ -27,6 +29,12 @@ public class RouteAfterExecute implements EdgeAction<DeepAgentState> {
 
     @Override
     public String apply(DeepAgentState state) {
+        // 智能 HITL Gate：ExecuteNode 置 NEED_CONFIRMATION=true 时立即结束图执行
+        if (state.needConfirmation()) {
+            log.info("RouteAfterExecute: 智能门控触发中断 → END");
+            return StateGraph.END;
+        }
+
         Optional<TodoItem> currentTodo = state.currentTodo();
 
         if (currentTodo.isEmpty()) {

@@ -1,7 +1,10 @@
 package com.hypersense.boot.framework.agents.config;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.hypersense.boot.framework.agents.checkpoint.PostgresqlSaver;
+import com.hypersense.boot.framework.agents.serializer.LangChain4jJacksonModule;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.openai.OpenAiChatModel;
 import lombok.RequiredArgsConstructor;
@@ -30,21 +33,24 @@ public class AgentAutoConfiguration {
     private final AgentProperties agentProperties;
 
     /**
-     * OpenAI 兼容 ChatModel（支持 OpenAI / DeepSeek / 通义千问等）
+     * OpenAI 兼容 ChatModel（支持 OpenAI / 智谱 GLM / 阿里百炼 / DeepSeek / 通义千问 等）
+     * <p>
+     * 根据 {@code agent.llm.chat-vendor} 选择 vendors Map 中对应厂商的 endpoint/apiKey/chat-model。
+     * </p>
      */
     @Bean
-    @ConditionalOnProperty(name = "agent.llm.provider", havingValue = "openai", matchIfMissing = true)
     @ConditionalOnMissingBean(ChatModel.class)
-    public ChatModel openAiChatModel() {
+    public ChatModel chatModel() {
         AgentProperties.LlmConfig llm = agentProperties.getLlm();
-        AgentProperties.OpenAiConfig openai = llm.getOpenai();
+        AgentProperties.VendorConfig vendor = llm.resolveVendor(llm.getChatVendor());
 
-        log.info("初始化 OpenAI 兼容 ChatModel: endpoint={}, model={}", openai.getEndpoint(), openai.getModelName());
+        log.info("初始化 ChatModel: vendor={}, endpoint={}, model={}",
+                llm.getChatVendor(), vendor.getEndpoint(), vendor.getChatModel());
 
         return OpenAiChatModel.builder()
-                .baseUrl(openai.getEndpoint())
-                .apiKey(openai.getApiKey())
-                .modelName(openai.getModelName())
+                .baseUrl(vendor.getEndpoint())
+                .apiKey(vendor.getApiKey())
+                .modelName(vendor.getChatModel())
                 .temperature(llm.getTemperature())
                 .maxTokens(llm.getMaxTokens())
                 .timeout(Duration.ofSeconds(120))
@@ -64,7 +70,12 @@ public class AgentAutoConfiguration {
     @ConditionalOnProperty(name = "agent.deep.checkpoint-enabled", havingValue = "true")
     public PostgresqlSaver postgresqlSaver(JdbcTemplate jdbcTemplate) {
         log.info("初始化 PostgreSQL 检查点持久化（PostgresqlSaver）");
+        // 注册 LangChain4j 消息类型的 Jackson 序列化器，否则 checkpoint 持久化时 UserMessage 等无法序列化
+        // 同时注册 JavaTimeModule 以支持 TodoItem/AgentSession 等含 LocalDateTime 字段的对象
         ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.registerModule(new LangChain4jJacksonModule());
+        objectMapper.registerModule(new JavaTimeModule());
+        objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         PostgresqlSaver saver = new PostgresqlSaver(jdbcTemplate, objectMapper);
         saver.setup();
         return saver;

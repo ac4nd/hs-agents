@@ -86,4 +86,17 @@ public class AgentController {
     public Result<InterruptContext> getInterruptContext(@PathVariable String sessionId) {
         return Result.success(agentService.getInterruptContext(sessionId));
     }
+
+    @Operation(summary = "当前用户会话列表", description = "查询当前登录用户的所有 Agent 会话（从 PostgreSQL 查询）")
+    @GetMapping("/sessions")
+    public Result<java.util.List<AgentSessionVO>> listSessions() {
+        return Result.success(agentService.listSessions());
+    }
+
+    @Operation(summary = "删除会话", description = "删除指定的 Agent 会话")
+    @DeleteMapping("/sessions/{sessionId}")
+    public Result<Void> deleteSession(@PathVariable String sessionId) {
+        agentService.deleteSession(sessionId);
+        return Result.success();
+    }
 }

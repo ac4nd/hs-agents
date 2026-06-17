@@ -16,6 +16,7 @@ import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.jdbc.BadSqlGrammarException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.validation.BindException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.MissingServletRequestParameterException;
@@ -247,13 +248,57 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(Exception.class)
     @ResponseStatus(HttpStatus.INTERNAL_SERVER_ERROR)
     public <T> Result<T> handleException(Exception e) throws Exception {
-        // 将 Spring Security 异常继续抛出，以便交给自定义处理器处理
+        // Spring Security 6 中 AuthorizationFilter 位于 ExceptionTranslationFilter 之后，
+        // AccessDeniedException / AuthenticationException 若在此重抛会冒泡到 servlet 容器。
+        // 改由专门的 @ExceptionHandler 处理（见 handleAccessDenied / handleAuthentication）。
         if (e instanceof AccessDeniedException
                 || e instanceof AuthenticationException) {
             throw e;
         }
         log.error("unknown exception", e);
         return Result.failed(e.getLocalizedMessage());
+    }
+
+    /**
+     * SSE / 流式响应客户端断开专用兜底。
+     * <p>
+     * Spring 6+ 将客户端断开（broken pipe / software aborted connection）包装为
+     * {@link AsyncRequestNotUsableException}，由 WebAsyncManager 在 ASYNC dispatch 时抛出。
+     * 此时响应 Content-Type 为 text/event-stream 且已 committed，若试图返回 {@link Result} JSON
+     * 会触发 HttpMessageNotWritableException 二次报错。
+     * </p>
+     * <p>
+     * 处理策略：仅记录 info 日志，不写响应体（容器会自动 close）。
+     * </p>
+     */
+    @ExceptionHandler(AsyncRequestNotUsableException.class)
+    public void handleAsyncClientDisconnect(AsyncRequestNotUsableException e) {
+        // 不返回任何内容，避免向已 committed 的 text/event-stream 响应写入 JSON 触发二次错误
+        log.info("异步请求客户端已断开，跳过响应: {}", e.getMessage());
+    }
+
+    /**
+     * Spring Security 6 授权拒绝（包含方法级 @PreAuthorize 抛出的 AuthorizationDeniedException
+     * 与 AuthorizationFilter 抛出的请求级拒绝）。
+     * <p>
+     * AuthorizationFilter 在 ExceptionTranslationFilter 之后执行，
+     * 默认 accessDeniedHandler 无法捕获 → 必须由全局 @ExceptionHandler 兜底，避免 dispatcherServlet 抛 ERROR。
+     */
+    @ExceptionHandler(AccessDeniedException.class)
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public <T> Result<T> handleAccessDenied(AccessDeniedException e) {
+        log.warn("访问拒绝: {}", e.getMessage());
+        return Result.failed(ResultCode.ACCESS_PERMISSION_EXCEPTION);
+    }
+
+    /**
+     * Spring Security 认证失败（token 无效 / 未登录）。
+     */
+    @ExceptionHandler(AuthenticationException.class)
+    @ResponseStatus(HttpStatus.UNAUTHORIZED)
+    public <T> Result<T> handleAuthentication(AuthenticationException e) {
+        log.warn("认证失败: {}", e.getMessage());
+        return Result.failed(ResultCode.ACCESS_TOKEN_INVALID);
     }
 
     /**

@@ -2,7 +2,9 @@ package com.hypersense.boot.framework.agents.config;
 
 import lombok.Data;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
@@ -47,13 +49,28 @@ public class AgentProperties {
      */
     private MemoryConfig memory = new MemoryConfig();
 
+    /**
+     * 会话内多轮上下文配置（history 滑窗 + 滚动摘要）
+     */
+    private HistoryConfig history = new HistoryConfig();
+
     @Data
     public static class LlmConfig {
 
         /**
-         * LLM 提供商：openai / ollama
+         * LLM 提供商（向后兼容字段，新代码请改用 chat-vendor / embedding-vendor）
          */
         private String provider = "openai";
+
+        /**
+         * Chat 模型使用的厂商，对应 vendors Map 的 key
+         */
+        private String chatVendor = "zhipu";
+
+        /**
+         * Embedding 模型使用的厂商，对应 vendors Map 的 key
+         */
+        private String embeddingVendor = "bailian";
 
         /**
          * 温度（0.0 - 2.0）
@@ -66,14 +83,74 @@ public class AgentProperties {
         private Integer maxTokens = 4096;
 
         /**
-         * OpenAI 兼容 API 配置
+         * 多厂商配置：key 为厂商名（zhipu / bailian / deepseek / openai / ollama 等），
+         * value 为 OpenAI 兼容 API 的连接参数
+         */
+        private Map<String, VendorConfig> vendors = new LinkedHashMap<>();
+
+        /**
+         * OpenAI 兼容 API 配置（向后兼容字段；新配置请填入 vendors）
          */
         private OpenAiConfig openai = new OpenAiConfig();
 
         /**
-         * Ollama 本地模型配置
+         * Ollama 本地模型配置（向后兼容字段；新配置请填入 vendors）
          */
         private OllamaConfig ollama = new OllamaConfig();
+
+        /**
+         * 根据 vendor 名取厂商配置；优先 vendors，未命中时回退到 openai/ollama 兼容字段。
+         */
+        public VendorConfig resolveVendor(String vendorName) {
+            if (vendorName == null || vendorName.isBlank()) {
+                vendorName = "openai";
+            }
+            VendorConfig v = vendors.get(vendorName);
+            if (v != null) {
+                return v;
+            }
+            // 向后兼容：把旧的 openai/ollama 字段包装成 VendorConfig
+            if ("ollama".equalsIgnoreCase(vendorName)) {
+                return new VendorConfig(ollama.getEndpoint(), null, ollama.getModelName(), null);
+            }
+            return new VendorConfig(openai.getEndpoint(), openai.getApiKey(), openai.getModelName(), null);
+        }
+    }
+
+    /**
+     * 单个 LLM/Embedding 厂商配置（OpenAI 兼容协议）
+     */
+    @Data
+    public static class VendorConfig {
+
+        /**
+         * API 基地址（不含 /chat/completions 或 /embeddings 后缀）
+         */
+        private String endpoint;
+
+        /**
+         * API Key
+         */
+        private String apiKey;
+
+        /**
+         * Chat 模型名
+         */
+        private String chatModel;
+
+        /**
+         * Embedding 模型名
+         */
+        private String embeddingModel;
+
+        public VendorConfig() {}
+
+        public VendorConfig(String endpoint, String apiKey, String chatModel, String embeddingModel) {
+            this.endpoint = endpoint;
+            this.apiKey = apiKey;
+            this.chatModel = chatModel;
+            this.embeddingModel = embeddingModel;
+        }
     }
 
     @Data
@@ -345,6 +422,28 @@ public class AgentProperties {
 
         /** 最大中断次数（0 = 无限制） */
         private Integer maxInterrupts = 0;
+
+        /** 智能 HITL Gate 配置（基于 LLM 判断） */
+        private SmartGateConfig smartGate = new SmartGateConfig();
+    }
+
+    /**
+     * 智能 HITL Gate 配置
+     * <p>
+     * 在指定决策点调用 LLM，根据「歧义 / 风险 / 改动巨大」三个维度判断是否需要用户确认。
+     * </p>
+     */
+    @Data
+    public static class SmartGateConfig {
+
+        /** 是否启用智能门控（默认关闭，开启后才会调用 LLM 判断） */
+        private Boolean enabled = false;
+
+        /** 启用的决策点（plan_completed / before_todo_execute） */
+        private List<String> decisionPoints = List.of("plan_completed", "before_todo_execute");
+
+        /** severity=low 时是否自动放行不中断（默认 true） */
+        private Boolean autoSkipLow = true;
     }
 
     /**
@@ -414,5 +513,27 @@ public class AgentProperties {
 
         /** 事实提取最小消息数（少于则不提取） */
         private Integer minMessagesForExtraction = 4;
+    }
+
+    /**
+     * 会话内多轮上下文配置
+     * <p>
+     * 控制 AgentSessionVO.history 的滑窗大小与滚动摘要行为，
+     * 避免长会话中 history 全量拼接导致 prompt token 线性增长。
+     * </p>
+     */
+    @Data
+    public static class HistoryConfig {
+        /** 会话内多轮上下文最多保留的最近消息条数（超出则进入待摘要区） */
+        private Integer maxRecentMessages = 10;
+
+        /** 是否启用 LLM 滚动摘要（关闭则仅滑窗丢弃，不调用 LLM） */
+        private Boolean enableSummary = true;
+
+        /** 待摘要消息累计到此条数时触发一次 LLM 摘要 */
+        private Integer summaryTriggerThreshold = 4;
+
+        /** 摘要的目标最大字符数（写入 prompt 的限制） */
+        private Integer summaryMaxChars = 500;
     }
 }

@@ -61,6 +61,11 @@ public class SecurityConfig {
 
         return http
                 .authorizeHttpRequests(requestMatcherRegistry -> {
+                            // SSE (SseEmitter) 等异步请求在客户端断开/超时/完成时触发 ASYNC dispatch，
+                            // 浏览器不会重发 Authorization header → SecurityContext 为空 → AuthorizationFilter 抛
+                            // AccessDeniedException 但响应已 commit，无法处理，刷 ERROR。
+                            // 解决：对 ASYNC dispatch 直接 permitAll，跳过授权检查。
+                            requestMatcherRegistry.dispatcherTypeMatchers(jakarta.servlet.DispatcherType.ASYNC).permitAll();
                             // 配置无需登录即可访问的公开接口
                             String[] ignoreUrls = securityProperties.getIgnoreUrls();
                             if (ArrayUtil.isNotEmpty(ignoreUrls)) {

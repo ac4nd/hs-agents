@@ -11,7 +11,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 智谱 Embedding API 客户端（RestTemplate 实现，避免 zai-sdk Jackson 版本冲突）
+ * OpenAI 兼容 Embedding API 客户端（RestTemplate 实现）
+ * <p>
+ * 通过 POST {@code /embeddings} 调用任何 OpenAI 兼容协议的厂商（智谱 GLM、阿里百炼、OpenAI 等）。
+ * 类名保留 Zhipu 前缀以保持向下兼容，实际行为为通用客户端。
+ * </p>
  *
  * @author Claude
  * @since 2026/5/29
