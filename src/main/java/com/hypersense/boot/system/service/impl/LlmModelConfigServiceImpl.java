@@ -83,4 +83,9 @@ public class LlmModelConfigServiceImpl extends ServiceImpl<LlmModelConfigMapper,
     public void deleteModelConfigByIds(List<String> ids) {
         this.removeByIds(ids);
     }
+
+    @Override
+    public List<LlmModelConfigVO> listByCurrentUser() {
+        return this.baseMapper.listEnabledByCurrentUser();
+    }
 }

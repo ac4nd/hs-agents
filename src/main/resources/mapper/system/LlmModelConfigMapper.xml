@@ -37,4 +37,29 @@
         </where>
         ORDER BY t1.sort, t1.create_time DESC
     </select>
+
+    <!-- 当前登录用户所属租户下启用的模型列表（tenant_id 由 TenantLineInnerInterceptor 自动注入） -->
+    <select id="listEnabledByCurrentUser" resultType="com.hypersense.boot.system.model.vo.LlmModelConfigVO">
+        SELECT
+            t1.id,
+            t1.api_key_config_id,
+            t3.key_name,
+            t1.model_name,
+            t1.model_display_name,
+            t1.context_window_size,
+            t1.max_output_tokens,
+            t1.model_capabilities,
+            t1.temperature,
+            t1.top_p,
+            t1.is_streaming,
+            t1.status,
+            t1.sort,
+            t1.remark,
+            t1.create_time
+        FROM sys_llm_model_config t1
+        LEFT JOIN sys_llm_api_key_config t3 ON t1.api_key_config_id = t3.id AND t3.is_deleted = 0
+        WHERE t1.is_deleted = 0
+          AND t1.status = 1
+        ORDER BY t1.sort, t1.create_time DESC
+    </select>
 </mapper>

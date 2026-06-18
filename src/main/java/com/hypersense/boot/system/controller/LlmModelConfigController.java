@@ -19,6 +19,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 import java.util.Arrays;
+import java.util.List;
 
 @Tag(name = "LLM模型配置")
 @RestController
@@ -35,6 +36,13 @@ public class LlmModelConfigController {
     public PageResult<LlmModelConfigVO> getModelConfigPage(LlmModelConfigQuery queryParams) {
         Page<LlmModelConfigVO> result = modelConfigService.getModelConfigPage(queryParams);
         return PageResult.success(result);
+    }
+
+    @Operation(summary = "当前登录用户可用的模型列表（聊天框下拉用）")
+    @GetMapping("/current-user")
+    public Result<List<LlmModelConfigVO>> listByCurrentUser() {
+        List<LlmModelConfigVO> list = modelConfigService.listByCurrentUser();
+        return Result.success(list);
     }
 
     @Operation(summary = "获取模型配置表单")

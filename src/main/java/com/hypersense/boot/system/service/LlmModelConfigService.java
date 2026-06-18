@@ -14,4 +14,10 @@ public interface LlmModelConfigService extends IService<LlmModelConfig> {
     boolean saveModelConfig(LlmModelConfigForm form);
     boolean updateModelConfig(Long id, LlmModelConfigForm form);
     void deleteModelConfigByIds(List<String> ids);
+
+    /**
+     * 查询当前登录用户所属租户下所有启用的模型列表。
+     * 用于聊天框下拉选择当前用户可用的 LLM。
+     */
+    List<LlmModelConfigVO> listByCurrentUser();
 }
