@@ -700,7 +700,7 @@ public class GodlikeAgent {
             PlanNode planNode = new PlanNode(model, disabledGate, defaultProps);
             ExecuteNode executeNode = new ExecuteNode(model, disabledGate);
             DelegateNode delegateNode = new DelegateNode(model, tools, subAgentDefinitions, sandboxManager);
-            ToolNode toolNode = ToolNode.create(tools, toolRetryConfig);
+            ToolNode toolNode = ToolNode.create(tools, toolRetryConfig, model);
             FinalizeNode finalizeNode = new FinalizeNode(model);
 
             // 创建路由

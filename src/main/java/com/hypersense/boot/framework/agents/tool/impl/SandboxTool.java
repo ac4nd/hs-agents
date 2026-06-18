@@ -5,9 +5,12 @@ import com.hypersense.boot.framework.agents.sandbox.Sandbox;
 import com.hypersense.boot.framework.agents.sandbox.SandboxManager;
 import com.hypersense.boot.framework.agents.sandbox.SandboxResult;
 import com.hypersense.boot.framework.agents.tool.ToolProvider;
+import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -83,9 +86,26 @@ public class SandboxTool implements ToolProvider {
 
     @Override
     public String description() {
-        return "沙箱工具：在隔离环境中执行代码、读写文件、编辑文件、搜索、运行命令。" +
-                "参数：action（execute_code/read_file/write_file/edit_file/list_dir/glob/grep/run_command），" +
-                "以及对应操作所需的 language/code/path/content/oldString/newString/startLine/endLine/newContent/pattern/includePattern/command 等参数。";
+        return "沙箱工具：在隔离环境中操作用户上传的附件、读写文件、编辑文件、执行代码、运行命令。" +
+                "**操作附件（uploads/ 路径下的文件）首选此工具**。" +
+                "参数：action（read_file/write_file/edit_file/list_dir/glob/grep/execute_code/run_command），" +
+                "以及对应操作所需的 path/content/language/code/command 等参数。" +
+                "读取附件属性或内容时用 action=read_file, path=附件路径。";
+    }
+
+    @Override
+    public ToolSpecification specification() {
+        return ToolSpecification.builder()
+                .name("sandbox")
+                .description("沙箱文件操作：支持 read_file/write_file/list_files/delete_file。args 内 operation 决定具体动作")
+                .parameters(JsonObjectSchema.builder()
+                        .addStringProperty("operation", "read_file | write_file | list_files | delete_file")
+                        .addStringProperty("filename", "操作的目标文件名（write_file/delete_file 时必填）")
+                        .addStringProperty("path", "读取/删除的相对路径（read_file/delete_file 时必填）")
+                        .addStringProperty("content", "写入内容（write_file 时必填）")
+                        .required(List.of("operation"))
+                        .build())
+                .build();
     }
 
     @Override

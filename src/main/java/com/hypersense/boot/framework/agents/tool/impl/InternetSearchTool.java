@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hypersense.boot.framework.agents.config.AgentProperties;
 import com.hypersense.boot.framework.agents.tool.ToolProvider;
+import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
@@ -64,7 +66,22 @@ public class InternetSearchTool implements ToolProvider {
 
     @Override
     public String description() {
-        return "通过互联网搜索获取信息。参数：query（搜索关键词），返回搜索结果列表（标题、摘要、链接）";
+        return "通过互联网搜索获取实时信息（新闻、天气、股价、最新数据等外部公开信息）。" +
+                "参数：query（搜索关键词）。" +
+                "**仅当任务明确需要查询互联网上的实时公开信息时使用**。" +
+                "不要用于：读取用户上传的附件、操作本地文件、执行代码——这些请用 sandbox 工具。";
+    }
+
+    @Override
+    public ToolSpecification specification() {
+        return ToolSpecification.builder()
+                .name("internet_search")
+                .description("网络搜索实时公开信息（新闻、天气、股价、最新动态等）。仅用于查询当前需要外部数据的场景")
+                .parameters(JsonObjectSchema.builder()
+                        .addStringProperty("query", "搜索关键词（如 '姆巴佩 最新转会'）")
+                        .required(List.of("query"))
+                        .build())
+                .build();
     }
 
     @Override
