@@ -16,9 +16,12 @@ import com.hypersense.boot.framework.agents.model.DeepAgentState;
 import com.hypersense.boot.framework.agents.model.InterruptContext;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import com.hypersense.boot.framework.agents.sandbox.SandboxManager;
+import com.hypersense.boot.framework.agents.sandbox.Sandbox;
+import com.hypersense.boot.framework.agents.sandbox.SandboxResult;
 import com.hypersense.boot.agents.service.AgentService;
 import com.hypersense.boot.framework.agents.skill.SkillsMiddleware;
 import com.hypersense.boot.framework.agents.vo.AgentSessionVO;
+import com.hypersense.boot.framework.agents.vo.AttachmentVO;
 import com.hypersense.boot.framework.agents.config.AgentProperties;
 import com.hypersense.boot.framework.security.util.SecurityUtils;
 import com.hypersense.boot.framework.tenant.TenantContextHolder;
@@ -33,12 +36,15 @@ import static org.bsc.langgraph4j.StateGraph.END;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.io.IOException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 
 /**
  * Agent 服务实现
@@ -64,6 +70,13 @@ public class AgentServiceImpl implements AgentService {
     private final SkillsMiddleware skillsMiddleware;
     /** 用于 history 滚动摘要的 ChatModel（与 PlanNode/ExecuteNode 同源，由 Spring 注入） */
     private final dev.langchain4j.model.chat.ChatModel chatModel;
+    /** 模型注册表：session 级 ChatModel 解析 + 兜底 */
+    private final com.hypersense.boot.framework.agents.llm.ChatModelRegistry chatModelRegistry;
+    /** sys_llm_model_config 服务：解析租户默认模型 / 校验 modelConfigId */
+    private final com.hypersense.boot.system.service.LlmModelConfigService llmModelConfigService;
+    /** sys_llm_api_key_config / sys_llm_vendor_config 服务：listAvailableModels 联表查询 */
+    private final com.hypersense.boot.system.service.LlmApiKeyConfigService llmApiKeyConfigService;
+    private final com.hypersense.boot.system.service.LlmVendorConfigService llmVendorConfigService;
 
     /** 编译图缓存：sessionId → CompiledGraph（Caffeine 自动过期，避免内存泄漏） */
     private final Cache<String, CompiledGraph<DeepAgentState>> graphCache;
@@ -77,7 +90,11 @@ public class AgentServiceImpl implements AgentService {
                             @Qualifier("agentTaskExecutor") org.springframework.core.task.TaskExecutor taskExecutor,
                             SandboxManager sandboxManager,
                             @org.springframework.lang.Nullable SkillsMiddleware skillsMiddleware,
-                            @org.springframework.lang.Nullable dev.langchain4j.model.chat.ChatModel chatModel) {
+                            @org.springframework.lang.Nullable dev.langchain4j.model.chat.ChatModel chatModel,
+                            com.hypersense.boot.framework.agents.llm.ChatModelRegistry chatModelRegistry,
+                            com.hypersense.boot.system.service.LlmModelConfigService llmModelConfigService,
+                            com.hypersense.boot.system.service.LlmApiKeyConfigService llmApiKeyConfigService,
+                            com.hypersense.boot.system.service.LlmVendorConfigService llmVendorConfigService) {
         this.deepAgentGraph = deepAgentGraph;
         this.agentProperties = agentProperties;
         this.redisTemplate = redisTemplate;
@@ -85,6 +102,10 @@ public class AgentServiceImpl implements AgentService {
         this.sandboxManager = sandboxManager;
         this.skillsMiddleware = skillsMiddleware;
         this.chatModel = chatModel;
+        this.chatModelRegistry = chatModelRegistry;
+        this.llmModelConfigService = llmModelConfigService;
+        this.llmApiKeyConfigService = llmApiKeyConfigService;
+        this.llmVendorConfigService = llmVendorConfigService;
         this.graphCache = Caffeine.newBuilder()
                 .expireAfterAccess(agentProperties.getDeep().getSessionTtl(), TimeUnit.SECONDS)
                 .maximumSize(100)
@@ -109,6 +130,9 @@ public class AgentServiceImpl implements AgentService {
             throw new BusinessException("启用 HITL 审批需要配置 agent.deep.checkpoint-enabled=true");
         }
 
+        // 解析 session 绑定的 modelConfigId：form → 租户默认模型 → null(兜底)
+        Long modelConfigId = resolveDefaultModelConfigId(form.getModelConfigId());
+
         AgentSessionVO session = AgentSessionVO.builder()
                 .sessionId(sessionId)
                 .userId(currentUserId)
@@ -118,25 +142,27 @@ public class AgentServiceImpl implements AgentService {
                 .enabledTools(form.getEnabledTools())
                 .hitlEnabled(hitlEnabled)
                 .hitlInterruptNodes(hitlInterruptNodes)
+                .modelConfigId(modelConfigId)
                 .createdAt(LocalDateTime.now())
                 .updatedAt(LocalDateTime.now())
                 .build();
 
         saveSession(session);
 
-        // 预构建编译图（根据 HITL 配置）
+        // 预构建编译图（按 session.modelConfigId 解析 ChatModel，未配置时回退兜底单例）
         try {
             DeepAgentGraph.HitlBuildConfig hitlConfig = hitlEnabled
                     ? new DeepAgentGraph.HitlBuildConfig(true, hitlInterruptNodes)
                     : DeepAgentGraph.HitlBuildConfig.disabled();
-            CompiledGraph<DeepAgentState> graph = deepAgentGraph.build(hitlConfig);
+            dev.langchain4j.model.chat.ChatModel sessionModel = chatModelRegistry.getOrDefault(modelConfigId);
+            CompiledGraph<DeepAgentState> graph = deepAgentGraph.build(sessionModel, hitlConfig);
             graphCache.put(sessionId, graph);
         } catch (Exception e) {
             throw new BusinessException("Agent 图构建失败: " + e.getMessage());
         }
 
-        log.info("创建 Agent 会话: sessionId={}, userId={}, hitlEnabled={}, instructions={}",
-                sessionId, currentUserId, hitlEnabled, form.getInstructions());
+        log.info("创建 Agent 会话: sessionId={}, userId={}, hitlEnabled={}, modelConfigId={}, instructions={}",
+                sessionId, currentUserId, hitlEnabled, modelConfigId, form.getInstructions());
         return session;
     }
 
@@ -176,14 +202,14 @@ public class AgentServiceImpl implements AgentService {
 
             saveSession(session);
             graphCache.invalidate(sessionId);
-            sandboxManager.destroy(sessionId);
+            // 沙箱跟随会话生命周期，单轮结束不销毁，仅 deleteSession 时清理
             log.info("Agent 会话执行完成: sessionId={}, userId={}", sessionId, session.getUserId());
         } catch (Exception e) {
             session.setStatus(SessionStatus.FAILED);
             session.setUpdatedAt(LocalDateTime.now());
             saveSession(session);
             graphCache.invalidate(sessionId);
-            sandboxManager.destroy(sessionId);
+            // 沙箱跟随会话生命周期，单轮失败不销毁，仅 deleteSession 时清理
             log.error("Agent 会话执行失败: sessionId={}, userId={}", sessionId, session.getUserId(), e);
             throw new BusinessException("Agent 执行失败: " + e.getMessage());
         }
@@ -193,8 +219,24 @@ public class AgentServiceImpl implements AgentService {
 
     @Override
     public SseEmitter streamExecute(String sessionId, String userInput) {
+        return streamExecute(sessionId, userInput, null, null);
+    }
+
+    @Override
+    public SseEmitter streamExecute(String sessionId, String userInput, Long modelConfigId, List<String> attachmentPaths) {
         AgentSessionVO session = getAndValidateSession(sessionId);
-        CompiledGraph<DeepAgentState> graph = getGraphOrThrow(sessionId);
+
+        // 附件路径非空 → 注入上下文提示到 input 头部
+        String effectiveInput = injectAttachmentContext(userInput, attachmentPaths);
+
+        // 切换检测：传入 modelConfigId 且与当前不一致 → invalidate 旧图 + 更新 session
+        if (modelConfigId != null && !modelConfigId.equals(session.getModelConfigId())) {
+            applyModelSwitch(session, modelConfigId);
+        }
+
+        // 传入 in-memory session（已应用 modelConfigId 切换），避免 getGraphOrThrow
+        // 重读 Redis 拿到旧 modelConfigId 导致图用旧模型重建（这是切换"看似没生效"的根因）
+        CompiledGraph<DeepAgentState> graph = getGraphOrThrow(sessionId, session);
         Long sessionUserId = session.getUserId();
 
         // 在 HTTP 请求线程预先捕获用户身份与租户上下文，
@@ -221,12 +263,10 @@ public class AgentServiceImpl implements AgentService {
                     s.setUpdatedAt(LocalDateTime.now());
                     saveSession(s);
                     graphCache.invalidate(sessionId);
-                    sandboxManager.destroy(sessionId);
                     log.warn("SSE Emitter 超时，HITL 会话已失效: sessionId={}", sessionId);
                 } else {
-                    // 非中断态的超时（如正常执行超时）也需清理沙箱资源，避免泄漏
-                    sandboxManager.destroy(sessionId);
-                    log.warn("SSE Emitter 超时，清理沙箱资源: sessionId={}, status={}",
+                    // 沙箱跟随会话生命周期，超时不主动销毁
+                    log.warn("SSE Emitter 超时: sessionId={}, status={}",
                             sessionId, s.getStatus());
                 }
             } catch (Exception ignored) {
@@ -241,12 +281,26 @@ public class AgentServiceImpl implements AgentService {
 
         // 异步执行（线程池管理）
         taskExecutor.execute(() -> {
+            // 提到 lambda 外的可变持有：通过事件总线捕获 FINAL_RESPONSE 文本，
+            // 比依赖 lastEndState.finalResponse()（END 节点 state 可能丢通道）更可靠
+            final String[] capturedFinalResponse = {null};
             // 设置子 Agent 事件总线：子 Agent 执行事件通过此消费者冒泡到 SSE
             SubAgentEventBus.set(event -> {
                 try {
                     emitter.send(SseEmitter.event().name("agent_event").data(event));
                 } catch (Exception e) {
                     log.warn("SSE 子 Agent 事件推送失败: {}", e.getMessage());
+                }
+                // 同步捕获 FINAL_RESPONSE 事件（PlanNode DIRECT_REPLY / FinalizeNode 都会推送）
+                if (event.getType() == AgentEventType.FINAL_RESPONSE
+                        && event.getData() != null) {
+                    Object dataRaw = event.getData();
+                    if (dataRaw instanceof Map<?, ?> map) {
+                        Object fr = map.get("finalResponse");
+                        if (fr instanceof String s && !s.isBlank()) {
+                            capturedFinalResponse[0] = s;
+                        }
+                    }
                 }
             });
 
@@ -258,7 +312,13 @@ public class AgentServiceImpl implements AgentService {
             boolean historyAppended = false; // 防止正常路径与 finally 重复追加
 
             try {
-                Map<String, Object> initialState = buildInitialState(sessionId, userInput, session.getEnabledTools(), session.getHistorySummary(), session.getHistory(), currentUserId, currentTenantId);
+                Map<String, Object> initialState = buildInitialState(sessionId, effectiveInput, session.getEnabledTools(), session.getHistorySummary(), session.getHistory(), currentUserId, currentTenantId);
+                // INFO 级别诊断：验证多轮上下文是否正确加载（用户报告"找不到历史内容"问题排查）
+                int histSize = session.getHistory() == null ? 0 : session.getHistory().size();
+                boolean hasSummary = session.getHistorySummary() != null && !session.getHistorySummary().isBlank();
+                log.info("streamExecute 上下文加载: sessionId={}, historySize={}, hasSummary={}, instructionsLen={}",
+                        sessionId, histSize, hasSummary,
+                        ((String) initialState.get(DeepAgentState.INSTRUCTIONS)).length());
 
                 // HITL 启用时注入状态标记
                 if (Boolean.TRUE.equals(session.getHitlEnabled())) {
@@ -328,7 +388,7 @@ public class AgentServiceImpl implements AgentService {
                 saveSession(latestSession);
                 // 不再主动 invalidate graphCache：session 在 Redis 仍活 30 分钟，下次对话需复用同一图实例。
                 // Caffeine 已配置 expireAfterAccess=sessionTtl + maximumSize=100，会自然过期。
-                sandboxManager.destroy(sessionId);
+                // 沙箱跟随会话生命周期，单轮结束不销毁，仅 deleteSession 时清理
                 activeEmitters.remove(sessionId);
                 log.info("Agent SSE 流式执行完成: sessionId={}, userId={}", sessionId, sessionUserId);
             } catch (Exception e) {
@@ -354,7 +414,7 @@ public class AgentServiceImpl implements AgentService {
                     latestSession.setUpdatedAt(LocalDateTime.now());
                     saveSession(latestSession);
                     // 不主动 invalidate graphCache：FAILED 后用户可能重试，保留图实例避免重建开销
-                    sandboxManager.destroy(sessionId);
+                    // 沙箱跟随会话生命周期，单轮失败不销毁，仅 deleteSession 时清理
                 } catch (Exception ignored) {
                 }
                 activeEmitters.remove(sessionId);
@@ -372,11 +432,21 @@ public class AgentServiceImpl implements AgentService {
                     try {
                         // 子线程无法读 SecurityContext，用入口捕获的 currentUserId 做归属校验
                         AgentSessionVO finalSession = loadSessionInternal(sessionId, currentUserId);
-                        // finalResponse 取自图终态（DIRECT_REPLY/Finalize 都会写 FINAL_RESPONSE 通道）
-                        String finalResp = lastEndState != null ? lastEndState.finalResponse().orElse(null) : null;
+                        // finalResponse 优先用事件总线捕获（更可靠），fallback 到 lastEndState
+                        String finalResp = capturedFinalResponse[0];
+                        if (finalResp == null && lastEndState != null) {
+                            finalResp = lastEndState.finalResponse().orElse(null);
+                        }
+                        int beforeHist = finalSession.getHistory() == null ? 0 : finalSession.getHistory().size();
                         appendConversationHistory(finalSession, userInput, finalResp);
                         saveSession(finalSession);
                         historyAppended = true;
+                        log.info("streamExecute history 追加完成: sessionId={}, finalRespLen={}, beforeHistSize={}, afterHistSize={}, hasSummary={}",
+                                sessionId,
+                                finalResp == null ? 0 : finalResp.length(),
+                                beforeHist,
+                                finalSession.getHistory() == null ? 0 : finalSession.getHistory().size(),
+                                finalSession.getHistorySummary() != null && !finalSession.getHistorySummary().isBlank());
                     } catch (Exception ex) {
                         log.warn("streamExecute finally: 追加 history 失败: sessionId={}, err={}",
                                 sessionId, ex.getMessage());
@@ -779,14 +849,65 @@ public class AgentServiceImpl implements AgentService {
     }
 
     /**
-     * 获取图实例（Caffeine 本地缓存，自动过期）
+     * 获取图实例（Caffeine 本地缓存，自动过期；cache miss 时从 session 重建）。
+     * <p>
+     * 重建路径覆盖两种场景：
+     * <ul>
+     *   <li>Caffeine 自然淘汰（sessionTtl 到期未访问）</li>
+     *   <li>切换模型后主动 invalidate（{@link #switchModel} / {@link #applyModelSwitch}）</li>
+     * </ul>
+     * 重建时按传入的 session.modelConfigId 解析 ChatModel，未配置时回退兜底单例。
+     * </p>
+     * <p>
+     * <b>关键：</b>调用方应传入已应用 modelConfigId 切换的 in-memory session，
+     * 不要在此处重新 loadSessionInternal 读 Redis —— 否则会在 applyModelSwitch 之后
+     * 但 saveSession 之前读到旧值，导致图用旧模型重建（看起来"切换没生效"）。
+     * </p>
+     *
+     * @param sessionId 会话 ID（缓存 key）
+     * @param session   调用方已确定状态的 session（携带最新 modelConfigId）
+     */
+    private CompiledGraph<DeepAgentState> getGraphOrThrow(String sessionId, AgentSessionVO session) {
+        return getGraphOrThrowInternal(sessionId, session);
+    }
+
+    /**
+     * 单参重载：兼容旧调用路径（execute / submitApproval / switchModel）。
+     * <p>
+     * 内部仍走 Redis 读取（这些路径的 session.modelConfigId 已先 saveSession 再调，
+     * 不会出现 streamExecute 的时序问题）。新增调用方应优先使用双参版本。
+     * </p>
      */
     private CompiledGraph<DeepAgentState> getGraphOrThrow(String sessionId) {
+        return getGraphOrThrowInternal(sessionId, null);
+    }
+
+    private CompiledGraph<DeepAgentState> getGraphOrThrowInternal(String sessionId, AgentSessionVO session) {
         CompiledGraph<DeepAgentState> graph = graphCache.getIfPresent(sessionId);
-        if (graph == null) {
-            throw new BusinessException("Agent 图实例不存在，请先创建会话: " + sessionId);
+        if (graph != null) {
+            return graph;
         }
-        return graph;
+        if (session == null) {
+            // 兜底：调用方未传 session 时回退到 Redis 读取（保留旧路径以兼容既有调用方）
+            session = loadSessionInternal(sessionId, getCurrentUserId());
+        }
+        if (session.getStatus() == null) {
+            throw new BusinessException("Agent 会话状态异常: " + sessionId);
+        }
+        try {
+            DeepAgentGraph.HitlBuildConfig hitlConfig = Boolean.TRUE.equals(session.getHitlEnabled())
+                    ? new DeepAgentGraph.HitlBuildConfig(true, session.getHitlInterruptNodes())
+                    : DeepAgentGraph.HitlBuildConfig.disabled();
+            dev.langchain4j.model.chat.ChatModel sessionModel =
+                    chatModelRegistry.getOrDefault(session.getModelConfigId());
+            CompiledGraph<DeepAgentState> rebuilt = deepAgentGraph.build(sessionModel, hitlConfig);
+            graphCache.put(sessionId, rebuilt);
+            log.info("图实例 cache miss 重建: sessionId={}, modelConfigId={}",
+                    sessionId, session.getModelConfigId());
+            return rebuilt;
+        } catch (Exception e) {
+            throw new BusinessException("Agent 图重建失败: " + e.getMessage());
+        }
     }
 
     // ========== HITL 辅助方法 ==========
@@ -802,6 +923,134 @@ public class AgentServiceImpl implements AgentService {
             return form.getHitlEnabled();
         }
         return Boolean.TRUE.equals(agentProperties.getHitl().getEnabled());
+    }
+
+    /**
+     * 解析 session 默认 modelConfigId。
+     * <p>优先级：form 显式指定 → 租户下 sort 最前的启用模型 → null（兜底单例）</p>
+     */
+    private Long resolveDefaultModelConfigId(Long formModelConfigId) {
+        if (formModelConfigId != null) {
+            // 校验存在且启用，避免脏数据导致后续 Registry 构建失败
+            com.hypersense.boot.system.model.entity.LlmModelConfig mc = llmModelConfigService.getById(formModelConfigId);
+            if (mc != null && Integer.valueOf(1).equals(mc.getStatus())) {
+                return formModelConfigId;
+            }
+            log.warn("form.modelConfigId={} 不存在或未启用，回退租户默认", formModelConfigId);
+        }
+        // 取当前租户下 sort 最小的启用模型作为默认（TenantLineInnerInterceptor 自动带 tenant_id 过滤）
+        try {
+            com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<com.hypersense.boot.system.model.entity.LlmModelConfig> w =
+                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<>();
+            w.eq(com.hypersense.boot.system.model.entity.LlmModelConfig::getStatus, 1)
+                    .orderByAsc(com.hypersense.boot.system.model.entity.LlmModelConfig::getSort)
+                    .last("LIMIT 1");
+            com.hypersense.boot.system.model.entity.LlmModelConfig def =
+                    llmModelConfigService.getOne(w, false);
+            return def != null ? def.getId() : null;
+        } catch (Exception e) {
+            log.warn("查询租户默认模型失败，回退兜底单例: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 切换会话绑定的 LLM 模型。
+     * <p>
+     * 验证 modelConfigId 可用后：
+     * <ol>
+     *   <li>invalidate graphCache：让下次调用走重建路径</li>
+     *   <li>invalidate ChatModelRegistry：让配置变更（如修改 endpoint）能即时生效</li>
+     *   <li>更新 session.modelConfigId 并持久化</li>
+     *   <li>清空 historySummary / pendingSummarySource：缓解跨模型解读漂移</li>
+     * </ol>
+     * </p>
+     */
+    @Override
+    public AgentSessionVO switchModel(String sessionId, Long modelConfigId) {
+        if (modelConfigId == null) {
+            throw new BusinessException("modelConfigId 不能为空");
+        }
+        Long currentUserId = getCurrentUserId();
+        AgentSessionVO session = loadSessionInternal(sessionId, currentUserId);
+
+        // 校验：模型存在 + 启用 + 同租户（loadSessionInternal 已鉴权）
+        com.hypersense.boot.system.model.entity.LlmModelConfig mc = llmModelConfigService.getById(modelConfigId);
+        if (mc == null) {
+            throw new BusinessException("模型配置不存在: id=" + modelConfigId);
+        }
+        if (!Integer.valueOf(1).equals(mc.getStatus())) {
+            throw new BusinessException("模型未启用: " + mc.getModelName());
+        }
+
+        applyModelSwitch(session, modelConfigId);
+        saveSession(session);
+
+        log.info("切换会话模型: sessionId={}, modelConfigId={}, modelName={}",
+                sessionId, modelConfigId, mc.getModelName());
+        return session;
+    }
+
+    /**
+     * 应用模型切换副作用（不保存 session，由调用方决定持久化时机）。
+     */
+    private void applyModelSwitch(AgentSessionVO session, Long modelConfigId) {
+        graphCache.invalidate(session.getSessionId());
+        chatModelRegistry.invalidate(modelConfigId);
+        session.setModelConfigId(modelConfigId);
+        session.setUpdatedAt(LocalDateTime.now());
+        // 跨模型 historySummary 可能漂移，清空保留 history 原文即可继续多轮
+        session.setHistorySummary(null);
+        session.setPendingSummarySource(null);
+    }
+
+    @Override
+    public List<com.hypersense.boot.framework.agents.vo.LlmModelOptionVO> listAvailableModels() {
+        // 当前租户下所有启用模型（TenantLineInnerInterceptor 自动带 tenant_id 过滤）
+        com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<com.hypersense.boot.system.model.entity.LlmModelConfig> w =
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<>();
+        w.eq(com.hypersense.boot.system.model.entity.LlmModelConfig::getStatus, 1)
+                .orderByAsc(com.hypersense.boot.system.model.entity.LlmModelConfig::getSort);
+        List<com.hypersense.boot.system.model.entity.LlmModelConfig> models = llmModelConfigService.list(w);
+
+        if (models.isEmpty()) {
+            return List.of();
+        }
+
+        // 批量加载关联的 apiKeyConfig + vendorConfig，避免 N+1
+        Set<Long> apiKeyIds = models.stream()
+                .map(com.hypersense.boot.system.model.entity.LlmModelConfig::getApiKeyConfigId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        Map<Long, com.hypersense.boot.system.model.entity.LlmApiKeyConfig> akcMap = apiKeyIds.isEmpty()
+                ? Map.of()
+                : llmApiKeyConfigService.listByIds(apiKeyIds).stream()
+                .collect(Collectors.toMap(com.hypersense.boot.system.model.entity.LlmApiKeyConfig::getId, a -> a));
+
+        Set<Long> vendorIds = akcMap.values().stream()
+                .map(com.hypersense.boot.system.model.entity.LlmApiKeyConfig::getVendorConfigId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        Map<Long, com.hypersense.boot.system.model.entity.LlmVendorConfig> vcMap = vendorIds.isEmpty()
+                ? Map.of()
+                : llmVendorConfigService.listByIds(vendorIds).stream()
+                .collect(Collectors.toMap(com.hypersense.boot.system.model.entity.LlmVendorConfig::getId, v -> v));
+
+        return models.stream().map(mc -> {
+            com.hypersense.boot.system.model.entity.LlmApiKeyConfig akc = akcMap.get(mc.getApiKeyConfigId());
+            com.hypersense.boot.system.model.entity.LlmVendorConfig vc =
+                    akc != null ? vcMap.get(akc.getVendorConfigId()) : null;
+            return com.hypersense.boot.framework.agents.vo.LlmModelOptionVO.builder()
+                    .modelConfigId(mc.getId())
+                    .modelName(mc.getModelName())
+                    .modelDisplayName(mc.getModelDisplayName())
+                    .vendorCode(vc != null ? vc.getVendorCode() : null)
+                    .vendorName(vc != null ? vc.getVendorName() : null)
+                    .modelCapabilities(mc.getModelCapabilities())
+                    .contextWindowSize(mc.getContextWindowSize())
+                    .maxOutputTokens(mc.getMaxOutputTokens())
+                    .build();
+        }).toList();
     }
 
     /**
@@ -1034,7 +1283,7 @@ public class AgentServiceImpl implements AgentService {
                     latestSession.setUpdatedAt(LocalDateTime.now());
                     saveSession(latestSession);
                     graphCache.invalidate(sessionId);
-                    sandboxManager.destroy(sessionId);
+                    // 沙箱跟随会话生命周期，单轮失败不销毁，仅 deleteSession 时清理
                 } catch (Exception ignored) {
                 }
                 activeEmitters.remove(sessionId);
@@ -1092,7 +1341,7 @@ public class AgentServiceImpl implements AgentService {
         latestSession.setUpdatedAt(LocalDateTime.now());
         saveSession(latestSession);
         graphCache.invalidate(sessionId);
-        sandboxManager.destroy(sessionId);
+        // 沙箱跟随会话生命周期，恢复执行完成不销毁，仅 deleteSession 时清理
         activeEmitters.remove(sessionId);
         log.info("Agent SSE 恢复执行完成: sessionId={}, userId={}", sessionId, sessionUserId);
     }
@@ -1147,5 +1396,252 @@ public class AgentServiceImpl implements AgentService {
         }
 
         log.info("Agent 会话已删除: sessionId={}, userId={}", sessionId, session.getUserId());
+    }
+
+    // ========== 附件上传 ==========
+
+    /** 单文件大小上限：10 MB */
+    private static final long ATTACHMENT_MAX_FILE_SIZE = 10L * 1024 * 1024;
+    /** 单次上传文件数量上限 */
+    private static final int ATTACHMENT_MAX_FILE_COUNT = 5;
+    /** 允许的扩展名白名单（小写、无点） */
+    private static final java.util.Set<String> ATTACHMENT_ALLOWED_EXTS = java.util.Set.of(
+            // 图片
+            "jpg", "jpeg", "png", "gif", "webp", "bmp", "svg",
+            // PDF
+            "pdf",
+            // Office
+            "doc", "docx", "xls", "xlsx", "ppt", "pptx",
+            // 文本/代码
+            "txt", "md", "markdown", "json", "csv", "tsv", "xml", "yaml", "yml",
+            "html", "htm", "css", "js", "ts", "jsx", "tsx",
+            "py", "java", "go", "rs", "c", "cc", "cpp", "h", "hpp",
+            "sh", "bash", "ps1", "bat",
+            "sql", "log", "ini", "conf", "toml"
+    );
+    /** 沙箱内附件存放的子目录 */
+    private static final String ATTACHMENT_DIR = "uploads";
+
+    @Override
+    public List<AttachmentVO> uploadAttachments(String sessionId, List<MultipartFile> files) {
+        // 1) 校验会话存在 + 归属当前用户
+        getAndValidateSession(sessionId);
+
+        if (files == null || files.isEmpty()) {
+            throw new BusinessException("未接收到任何文件");
+        }
+        if (files.size() > ATTACHMENT_MAX_FILE_COUNT) {
+            throw new BusinessException("单次最多上传 " + ATTACHMENT_MAX_FILE_COUNT + " 个文件，当前: " + files.size());
+        }
+
+        Sandbox sandbox = sandboxManager.getOrCreate(sessionId);
+        List<AttachmentVO> result = new ArrayList<>(files.size());
+        // 同名文件去重计数器
+        java.util.Map<String, Integer> nameCounter = new java.util.HashMap<>();
+
+        for (MultipartFile file : files) {
+            if (file == null || file.isEmpty()) {
+                throw new BusinessException("文件内容为空: " + (file != null ? file.getOriginalFilename() : "null"));
+            }
+            if (file.getSize() > ATTACHMENT_MAX_FILE_SIZE) {
+                throw new BusinessException(
+                        "文件超过 10MB 上限: " + file.getOriginalFilename() + " (" + file.getSize() + " bytes)");
+            }
+            String originalName = file.getOriginalFilename();
+            if (originalName == null || originalName.isBlank()) {
+                throw new BusinessException("文件名为空");
+            }
+            // 路径穿越防护：仅保留文件名部分
+            String safeName = sanitizeFilename(originalName);
+            String ext = extractExtension(safeName);
+            if (!ATTACHMENT_ALLOWED_EXTS.contains(ext)) {
+                throw new BusinessException("不支持的文件类型: ." + ext + "（文件: " + safeName + "）");
+            }
+
+            // 同名去重：report.pdf → report.pdf / report_2.pdf / report_3.pdf
+            String targetName = safeName;
+            int count = nameCounter.getOrDefault(safeName.toLowerCase(), 0);
+            if (count > 0) {
+                String base = safeName.substring(0, safeName.length() - ext.length() - 1);
+                targetName = base + "_" + (count + 1) + "." + ext;
+            }
+            nameCounter.merge(safeName.toLowerCase(), 1, Integer::sum);
+
+            String targetPath = ATTACHMENT_DIR + "/" + targetName;
+            try {
+                SandboxResult writeResult = sandbox.writeBytes(targetPath, file.getBytes());
+                if (!writeResult.isSuccess()) {
+                    throw new BusinessException("写入沙箱失败: " + safeName + " - " + writeResult.getError());
+                }
+            } catch (IOException e) {
+                throw new BusinessException("读取上传文件失败: " + safeName + " - " + e.getMessage());
+            }
+
+            result.add(AttachmentVO.builder()
+                    .name(targetName)
+                    .path(targetPath)
+                    .size(file.getSize())
+                    .mimeType(file.getContentType())
+                    .uploadedAt(java.time.OffsetDateTime.now().toString())
+                    .build());
+            log.info("附件上传成功: sessionId={}, path={}, size={}", sessionId, targetPath, file.getSize());
+        }
+
+        return result;
+    }
+
+    @Override
+    public List<AttachmentVO> listAttachments(String sessionId) {
+        getAndValidateSession(sessionId);
+        Sandbox sandbox = sandboxManager.getOrCreate(sessionId);
+        // 直接用结构化 listFiles，避免 listDirectory 的 ls -la 文本格式解析脆弱性
+        java.util.List<Sandbox.FileEntry> entries;
+        try {
+            entries = sandbox.listFiles(ATTACHMENT_DIR);
+        } catch (IllegalArgumentException e) {
+            // uploads/ 目录尚未创建（用户未上传过）
+            return List.of();
+        }
+        List<AttachmentVO> result = new ArrayList<>(entries.size());
+        for (Sandbox.FileEntry e : entries) {
+            if (e.isDirectory()) continue;  // 仅返回文件，跳过子目录
+            String fileName = e.getName();
+            result.add(AttachmentVO.builder()
+                    .name(fileName)
+                    .path(ATTACHMENT_DIR + "/" + fileName)
+                    .size(e.getSize())
+                    .mimeType(guessMimeType(fileName))
+                    .uploadedAt(java.time.OffsetDateTime.now().toString())
+                    .build());
+        }
+        return result;
+    }
+
+    @Override
+    public byte[] readFileBytes(String sessionId, String path) {
+        getAndValidateSession(sessionId);
+        if (path == null || path.isBlank()) {
+            throw new BusinessException("文件路径不能为空");
+        }
+        // 归一化路径：反斜杠转正斜杠、去前导斜杠、trim
+        String normalized = path.replace('\\', '/').trim();
+        if (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        // 拒绝明显的 .. 穿越；真正的越界防护由 sandbox.readAllBytes -> resolveSecurePath 完成
+        if (normalized.contains("..")) {
+            throw new BusinessException("禁止使用 .. 的路径穿越");
+        }
+        Sandbox sandbox = sandboxManager.getOrCreate(sessionId);
+        try {
+            return sandbox.readAllBytes(normalized);
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(e.getMessage());
+        }
+    }
+
+    @Override
+    public void writeFileText(String sessionId, String path, String content) {
+        getAndValidateSession(sessionId);
+        if (path == null || path.isBlank()) {
+            throw new BusinessException("文件路径不能为空");
+        }
+        String normalized = path.replace('\\', '/').trim();
+        if (normalized.startsWith("/")) {
+            normalized = normalized.substring(1);
+        }
+        if (normalized.contains("..")) {
+            throw new BusinessException("禁止使用 .. 的路径穿越");
+        }
+        Sandbox sandbox = sandboxManager.getOrCreate(sessionId);
+        try {
+            SandboxResult writeResult = sandbox.writeFile(normalized, content == null ? "" : content);
+            if (writeResult == null || !writeResult.isSuccess()) {
+                String err = writeResult == null ? "未知错误" : writeResult.getError();
+                log.error("沙箱文件写入失败: sessionId={}, path={}, err={}", sessionId, normalized, err);
+                throw new BusinessException("文件写入失败: " + err);
+            }
+            log.info("沙箱文件写入成功: sessionId={}, path={}, bytes={}", sessionId, normalized, content == null ? 0 : content.length());
+        } catch (BusinessException e) {
+            throw e;
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(e.getMessage());
+        } catch (Exception e) {
+            log.error("沙箱文件写入失败: sessionId={}, path={}", sessionId, normalized, e);
+            throw new BusinessException("文件写入失败: " + e.getMessage());
+        }
+    }
+
+    /**
+     * @deprecated 改用 {@link #readFileBytes(String, String)}，保留委托以兼容 ChatBubble 等现有调用方。
+     */
+    @Deprecated
+    @Override
+    public byte[] readAttachmentBytes(String sessionId, String path) {
+        return readFileBytes(sessionId, path);
+    }
+
+    /**
+     * 把附件路径列表作为上下文提示注入到 userInput 之前。
+     * <p>
+     * 增强：明确指代关系（用户消息中"这个图片/这个文件/该附件"等指代即以下附件），
+     * 并提示正确的工具（sandbox + action=read_file），避免误用 internet_search。
+     * </p>
+     */
+    private String injectAttachmentContext(String userInput, List<String> attachmentPaths) {
+        if (attachmentPaths == null || attachmentPaths.isEmpty()) {
+            return userInput;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("[用户已上传附件 - 用户消息中提到的「这个图片」「这个文件」「该附件」「这张图」等指代，")
+          .append("除非特别说明，否则指的就是以下附件]\n");
+        for (String p : attachmentPaths) {
+            if (p == null || p.isBlank()) continue;
+            String fileName = sanitizeFilename(p);
+            String mime = guessMimeType(fileName);
+            sb.append("- 路径: ").append(p)
+              .append("（文件名: ").append(fileName)
+              .append(", 类型: ").append(mime).append("）\n");
+            // TODO: 若需精确 size，可在此调 sandbox.listFiles 获取元信息；当前省略以避免额外 IO。
+        }
+        sb.append("\n[工具使用提示] 如需读取附件内容/查看附件属性/操作附件，")
+          .append("请使用 sandbox 工具（action=read_file, path=<上方路径>）或 action=list_dir 列出 uploads 目录。")
+          .append("**不要**用 internet_search 搜索附件相关内容——附件就在沙箱内，直接读即可。\n\n");
+        sb.append(userInput == null ? "" : userInput);
+        return sb.toString();
+    }
+
+    /** 截取最后一个路径分隔符后的文件名，禁止穿越 */
+    private static String sanitizeFilename(String raw) {
+        String name = raw.replace("\\", "/").substring(Math.max(0, raw.replace("\\", "/").lastIndexOf('/') + 1));
+        return name.isBlank() ? "unnamed" : name;
+    }
+
+    private static String extractExtension(String filename) {
+        int dot = filename.lastIndexOf('.');
+        if (dot < 0 || dot == filename.length() - 1) return "";
+        return filename.substring(dot + 1).toLowerCase();
+    }
+
+    private static String guessMimeType(String fileName) {
+        String ext = extractExtension(fileName);
+        return switch (ext) {
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "png" -> "image/png";
+            case "gif" -> "image/gif";
+            case "webp" -> "image/webp";
+            case "svg" -> "image/svg+xml";
+            case "bmp" -> "image/bmp";
+            case "pdf" -> "application/pdf";
+            case "doc", "docx" -> "application/msword";
+            case "xls", "xlsx" -> "application/vnd.ms-excel";
+            case "ppt", "pptx" -> "application/vnd.ms-powerpoint";
+            case "json" -> "application/json";
+            case "xml" -> "application/xml";
+            case "html", "htm" -> "text/html";
+            case "css" -> "text/css";
+            case "js" -> "application/javascript";
+            default -> "application/octet-stream";
+        };
     }
 }

@@ -171,9 +171,13 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
 
     private String decideStrategy(DeepAgentState state, TodoItem todo) {
         try {
+            // state.instructions() 包含附件上下文（由 AgentServiceImpl.injectAttachmentContext 注入），
+            // 让决策 LLM 能感知附件指代，避免在附件场景误判 direct/delegate 而绕过 sandbox 工具。
+            String userContext = state.instructions() != null ? state.instructions() : "";
             List<ChatMessage> messages = List.of(
                     SystemMessage.from(EXECUTE_SYSTEM_PROMPT),
-                    UserMessage.from("任务描述：" + todo.getDescription())
+                    UserMessage.from("任务描述：" + todo.getDescription()
+                            + "\n\n用户上下文（含附件信息，如有）：" + userContext)
             );
             ChatResponse response = chatModel.chat(messages);
             String decision = response.aiMessage().text().trim().toLowerCase();
@@ -196,11 +200,15 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
     private String executeDirect(DeepAgentState state, TodoItem todo) {
         try {
             String prompt = String.format("""
-                    用户原始指令：%s
+                    用户原始指令（含历史上下文区块，已是 ground truth，可直接引用）：%s
 
                     当前待完成 TODO：%s
 
                     请直接完成该 TODO 并输出面向用户的自然语言结果，不要提及"我是 AI 助手"等元描述。
+                    规则提醒：
+                    - 若 TODO 提到"上面/刚才/之前"的内容，请先从【历史摘要】或【最近对话】中查找，找到后直接基于该内容执行。
+                    - 若 TODO 需要保存文件，请使用 sandbox 工具写入沙箱工作目录（不要只输出文本）。
+                    - 仅当 TODO 明确要求新外部信息时，才提示需要工具支持。
                     """, state.instructions(), todo.getDescription());
             List<ChatMessage> messages = List.of(
                     SystemMessage.from("你是任务执行助手，按指令完成单步任务并输出自然语言结果。"),
