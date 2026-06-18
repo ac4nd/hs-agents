@@ -49,6 +49,66 @@ public abstract class Sandbox {
     public abstract SandboxResult writeFile(String path, String content);
 
     /**
+     * 写入二进制文件（图片、PDF 等）
+     *
+     * @param path 文件路径
+     * @param data 字节内容
+     * @return 写入结果
+     */
+    public abstract SandboxResult writeBytes(String path, byte[] data);
+
+    /**
+     * 读取文件全部字节（用于图片预览等二进制内容下载）。
+     *
+     * @param path 文件路径（沙箱内的相对路径）
+     * @return 文件字节内容
+     */
+    public byte[] readAllBytes(String path) {
+        throw new UnsupportedOperationException("readAllBytes 未实现: " + type());
+    }
+
+    /**
+     * 列出目录下所有文件的结构化信息（用于附件列表展示）。
+     * <p>
+     * 与 {@link #listDirectory(String)} 的字符串输出不同，本方法返回结构化数据，
+     * 避免 service 层依赖 ls -la 文本格式解析。
+     * </p>
+     *
+     * @param path 目录路径
+     * @return 文件条目列表（不含目录本身，仅文件）
+     */
+    public java.util.List<FileEntry> listFiles(String path) {
+        throw new UnsupportedOperationException("listFiles 未实现: " + type());
+    }
+
+    /**
+     * 文件条目：name + size + 是否目录。
+     */
+    public static class FileEntry {
+        private final String name;
+        private final long size;
+        private final boolean directory;
+
+        public FileEntry(String name, long size, boolean directory) {
+            this.name = name;
+            this.size = size;
+            this.directory = directory;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public long getSize() {
+            return size;
+        }
+
+        public boolean isDirectory() {
+            return directory;
+        }
+    }
+
+    /**
      * 编辑文件（行级编辑）
      * <p>
      * 支持两种编辑模式（互斥，优先使用 oldString/newString）：

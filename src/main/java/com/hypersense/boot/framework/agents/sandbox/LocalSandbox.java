@@ -224,6 +224,74 @@ public class LocalSandbox extends Sandbox {
     }
 
     @Override
+    public SandboxResult writeBytes(String path, byte[] data) {
+        try {
+            Path resolved = resolveSecurePath(path);
+            if (resolved == null) {
+                return SandboxResult.fail("路径不合法或越界: " + path, type());
+            }
+            Files.createDirectories(resolved.getParent());
+            Files.write(resolved, data != null ? data : new byte[0]);
+            return SandboxResult.builder()
+                    .success(true)
+                    .sandboxType(type())
+                    .build();
+        } catch (IOException e) {
+            log.error("LocalSandbox: 写入二进制文件失败 path={}", path, e);
+            return SandboxResult.fail("写入二进制文件失败: " + e.getMessage(), type());
+        }
+    }
+
+    /**
+     * 读取文件全部字节（用于图片预览等二进制内容下载）。
+     * 路径必须在沙箱工作目录内，防止越界读取。
+     */
+    @Override
+    public byte[] readAllBytes(String path) {
+        Path resolved = resolveSecurePath(path);
+        if (resolved == null) {
+            throw new IllegalArgumentException("路径不合法或越界: " + path);
+        }
+        if (!Files.exists(resolved) || !Files.isRegularFile(resolved)) {
+            throw new IllegalArgumentException("文件不存在: " + path);
+        }
+        try {
+            return Files.readAllBytes(resolved);
+        } catch (IOException e) {
+            throw new RuntimeException("读取文件失败: " + path, e);
+        }
+    }
+
+    /**
+     * 结构化列出目录下文件，避免依赖 ls -la 文本格式解析。
+     */
+    @Override
+    public java.util.List<Sandbox.FileEntry> listFiles(String path) {
+        Path resolved = resolveSecurePath(path);
+        if (resolved == null) {
+            throw new IllegalArgumentException("路径不合法或越界: " + path);
+        }
+        if (!Files.isDirectory(resolved)) {
+            return java.util.Collections.emptyList();
+        }
+        java.util.List<Sandbox.FileEntry> entries = new java.util.ArrayList<>();
+        try (Stream<Path> stream = Files.list(resolved)) {
+            stream.forEach(p -> {
+                try {
+                    long size = Files.size(p);
+                    boolean isDir = Files.isDirectory(p);
+                    entries.add(new Sandbox.FileEntry(p.getFileName().toString(), size, isDir));
+                } catch (IOException ignored) {
+                    // 跳过无法读取元信息的条目
+                }
+            });
+        } catch (IOException e) {
+            throw new RuntimeException("列出目录失败: " + path, e);
+        }
+        return entries;
+    }
+
+    @Override
     public SandboxResult editFile(String path, String oldString, String newString,
                                   Integer startLine, Integer endLine, String newContent) {
         long start = System.currentTimeMillis();

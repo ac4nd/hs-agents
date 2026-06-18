@@ -292,6 +292,37 @@ public abstract class AbstractContainerSandbox extends Sandbox {
     }
 
     @Override
+    public SandboxResult writeBytes(String path, byte[] data) {
+        ensureContainerReady();
+        long start = System.currentTimeMillis();
+        try {
+            String containerPath = resolveContainerPath(path);
+            int lastSlash = containerPath.lastIndexOf('/');
+            String fileName = lastSlash >= 0 ? containerPath.substring(lastSlash + 1) : containerPath;
+            String parentDir = lastSlash > 0 ? containerPath.substring(0, lastSlash) : "/";
+
+            byte[] tarBytes = createTarBytes(fileName, data != null ? data : new byte[0]);
+            execInContainer(new String[]{"mkdir", "-p", parentDir}, 5);
+            try (InputStream tarStream = new ByteArrayInputStream(tarBytes)) {
+                dockerClient.copyArchiveToContainerCmd(containerId)
+                        .withTarInputStream(tarStream)
+                        .withRemotePath(parentDir)
+                        .exec();
+            }
+            execInContainer(new String[]{"chown", "sandbox:sandbox", containerPath}, 5, "root");
+
+            long elapsed = System.currentTimeMillis() - start;
+            return SandboxResult.builder()
+                    .success(true)
+                    .elapsedMs(elapsed)
+                    .sandboxType(type())
+                    .build();
+        } catch (Exception e) {
+            return SandboxResult.fail("写入二进制文件失败: " + e.getMessage(), type());
+        }
+    }
+
+    @Override
     public SandboxResult listDirectory(String path) {
         ensureContainerReady();
         String containerPath = resolveContainerPath(path);
@@ -736,9 +767,12 @@ public abstract class AbstractContainerSandbox extends Sandbox {
      * 构建 tar 字节数组（用于写入文件到容器）
      */
     private byte[] createTarBytes(String fileName, String content) throws IOException {
+        return createTarBytes(fileName, content.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private byte[] createTarBytes(String fileName, byte[] contentBytes) throws IOException {
         ByteArrayOutputStream baos = new ByteArrayOutputStream();
         try (TarArchiveOutputStream tos = new TarArchiveOutputStream(baos)) {
-            byte[] contentBytes = content.getBytes(StandardCharsets.UTF_8);
             TarArchiveEntry entry = new TarArchiveEntry(fileName);
             entry.setSize(contentBytes.length);
             tos.putArchiveEntry(entry);

@@ -59,6 +59,11 @@ public class RemoteSandbox extends Sandbox {
     }
 
     @Override
+    public SandboxResult writeBytes(String path, byte[] data) {
+        return SandboxResult.notImplemented(type());
+    }
+
+    @Override
     public SandboxResult editFile(String path, String oldString, String newString,
                                   Integer startLine, Integer endLine, String newContent) {
         return SandboxResult.notImplemented(type());
