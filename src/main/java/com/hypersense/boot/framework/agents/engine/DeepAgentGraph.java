@@ -47,20 +47,15 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
 @Component
 public class DeepAgentGraph {
 
-    private final PlanNode planNode;
-    private final ExecuteNode executeNode;
-    // DelegateNode 不再通过 Spring 注入，在 build() 中手动构造
+    // toolNode 无 ChatModel 依赖，继续复用 Spring 单例
     private final ToolNode toolNode;
-    private final FinalizeNode finalizeNode;
     private final RouteAfterPlan routeAfterPlan;
     private final RouteAfterExecute routeAfterExecute;
     private final AgentProperties agentProperties;
     private final Optional<BaseCheckpointSaver> checkpointSaver;
 
-    // DelegateNode 构造所需依赖
+    // 兜底 ChatModel：session 未指定模型或 Registry 构建失败时使用
     private final ChatModel chatModel;
-    private final List<ToolProvider> toolProviders;
-    private final Optional<SandboxManager> sandboxManager;
 
     // SkillsMiddleware（条件注入，通过 SkillAutoConfiguration 创建）
     private final Optional<SkillsMiddleware> skillsMiddleware;
@@ -68,66 +63,71 @@ public class DeepAgentGraph {
     // MemoryMiddleware（条件注入，通过 MemoryAutoConfiguration 创建）
     private final Optional<MemoryMiddleware> memoryMiddleware;
 
-    public DeepAgentGraph(PlanNode planNode,
-                          ExecuteNode executeNode,
-                          ToolNode toolNode,
-                          FinalizeNode finalizeNode,
+    // 节点工厂：按 session 绑定的 ChatModel 实例化节点（支持会话级模型切换）
+    private final NodeFactory nodeFactory;
+
+    public DeepAgentGraph(ToolNode toolNode,
                           RouteAfterPlan routeAfterPlan,
                           RouteAfterExecute routeAfterExecute,
                           AgentProperties agentProperties,
                           Optional<BaseCheckpointSaver> checkpointSaver,
                           ChatModel chatModel,
-                          List<ToolProvider> toolProviders,
-                          Optional<SandboxManager> sandboxManager,
                           Optional<SkillsMiddleware> skillsMiddleware,
-                          Optional<MemoryMiddleware> memoryMiddleware) {
-        this.planNode = planNode;
-        this.executeNode = executeNode;
+                          Optional<MemoryMiddleware> memoryMiddleware,
+                          NodeFactory nodeFactory) {
         this.toolNode = toolNode;
-        this.finalizeNode = finalizeNode;
         this.routeAfterPlan = routeAfterPlan;
         this.routeAfterExecute = routeAfterExecute;
         this.agentProperties = agentProperties;
         this.checkpointSaver = checkpointSaver;
         this.chatModel = chatModel;
-        this.toolProviders = toolProviders;
-        this.sandboxManager = sandboxManager;
         this.skillsMiddleware = skillsMiddleware;
         this.memoryMiddleware = memoryMiddleware;
+        this.nodeFactory = nodeFactory;
     }
 
     /**
-     * 构建 Deep Agent 执行图（无 HITL，向后兼容）
-     *
-     * @return 编译后的可执行图
+     * 构建 Deep Agent 执行图（无 HITL，向后兼容；使用 Spring 注入的兜底 ChatModel）。
      */
     public CompiledGraph<DeepAgentState> build() throws GraphStateException {
         return build(null);
     }
 
     /**
-     * 构建 Deep Agent 执行图（支持 HITL 中断配置）
+     * 构建 Deep Agent 执行图（支持 HITL 中断配置；使用 Spring 注入的兜底 ChatModel）。
      * <p>
-     * 当 hitlEnabled=true 时，通过 {@link CompileConfig#interruptsBefore()} 配置中断点，
-     * 图执行到指定节点前自动暂停并保存 checkpoint。
+     * 旧路径，等价于 {@link #build(ChatModel, HitlBuildConfig)} 传入 {@code null} sessionModel。
      * </p>
-     *
-     * @param hitlConfig HITL 配置（null 或 hitlEnabled=false 时不配置中断）
-     * @return 编译后的可执行图
      */
     public CompiledGraph<DeepAgentState> build(HitlBuildConfig hitlConfig) throws GraphStateException {
-        log.info("构建 Deep Agent 执行图, hitlEnabled={}",
-                hitlConfig != null && hitlConfig.hitlEnabled);
+        return build(null, hitlConfig);
+    }
 
-        // 手动构造 DelegateNode（Spring 路径默认无子 Agent 定义）
-        DelegateNode delegateNode = new DelegateNode(
-                chatModel, toolProviders, List.of(), sandboxManager.orElse(null));
+    /**
+     * 构建 Deep Agent 执行图（支持会话级 ChatModel 绑定 + HITL 中断配置）。
+     * <p>
+     * sessionModel 为 null 时回退 Spring 注入的兜底 ChatModel（向后兼容旧调用方）。
+     * 节点通过 {@link NodeFactory} 按 sessionModel 实例化，避免单例 ChatModel 强耦合。
+     * </p>
+     *
+     * @param sessionModel session 绑定的 ChatModel（可为 null，回退兜底）
+     * @param hitlConfig   HITL 配置（null 或 hitlEnabled=false 时不配置中断）
+     */
+    public CompiledGraph<DeepAgentState> build(ChatModel sessionModel, HitlBuildConfig hitlConfig) throws GraphStateException {
+        ChatModel effectiveModel = sessionModel != null ? sessionModel : this.chatModel;
+        log.info("构建 Deep Agent 执行图, hitlEnabled={}, sessionModelBound={}",
+                hitlConfig != null && hitlConfig.hitlEnabled, sessionModel != null);
+
+        // 通过 NodeFactory 按 session 模型构造节点；sessionModel 为空时使用兜底单例
+        PlanNode sessionPlanNode = nodeFactory.planNode(effectiveModel);
+        ExecuteNode sessionExecuteNode = nodeFactory.executeNode(effectiveModel);
+        FinalizeNode sessionFinalizeNode = nodeFactory.finalizeNode(effectiveModel);
+        DelegateNode delegateNode = nodeFactory.delegateNode(effectiveModel);
 
         // 构建编译配置
         var configBuilder = CompileConfig.builder()
                 .recursionLimit(agentProperties.getDeep().getRecursionLimit());
 
-        // HITL 中断配置
         if (hitlConfig != null && hitlConfig.hitlEnabled) {
             List<String> interruptNodes = resolveInterruptNodes(hitlConfig);
             if (!interruptNodes.isEmpty()) {
@@ -145,7 +145,7 @@ public class DeepAgentGraph {
         );
 
         // 添加节点（plan 节点条件包装 SkillsMiddleware + MemoryMiddleware）
-        NodeAction<DeepAgentState> planBase = planNode;
+        NodeAction<DeepAgentState> planBase = sessionPlanNode;
         NodeAction<DeepAgentState> planWithSkills = skillsMiddleware
                 .map(mw -> wrapWithSkillMiddleware("plan", planBase, mw))
                 .orElse(planBase);
@@ -153,34 +153,24 @@ public class DeepAgentGraph {
                 .map(mw -> wrapWithMemoryMiddleware("plan", planWithSkills, mw))
                 .orElse(planWithSkills);
         graph.addNode("plan", node_async(planWithMemory));
-        graph.addNode("execute", node_async(executeNode));
+        graph.addNode("execute", node_async(sessionExecuteNode));
         graph.addNode("delegate", node_async(delegateNode));
         graph.addNode("tool", node_async(toolNode));
 
-        // finalize 节点条件包装 MemoryMiddleware（after: 提取事实）
         NodeAction<DeepAgentState> wrappedFinalizeNode = memoryMiddleware
-                .map(mw -> wrapWithMemoryMiddleware("finalize", finalizeNode, mw))
-                .orElse(finalizeNode);
+                .map(mw -> wrapWithMemoryMiddleware("finalize", sessionFinalizeNode, mw))
+                .orElse(sessionFinalizeNode);
         graph.addNode("finalize", node_async(wrappedFinalizeNode));
 
-        // 添加边
         graph.addEdge(START, "plan");
-
-        // 规划后路由：有待执行 → execute，全部完成 → finalize
         graph.addConditionalEdges("plan",
                 edge_async(routeAfterPlan),
-                Map.of("execute", "execute", "finalize", "finalize"));
-
-        // 执行后路由：委派 → delegate，工具 → tool，其他 → plan
+                Map.of("execute", "execute", "finalize", "finalize", END, END));
         graph.addConditionalEdges("execute",
                 edge_async(routeAfterExecute),
                 Map.of("delegate", "delegate", "tool", "tool", "plan", "plan"));
-
-        // 委派和工具执行后回到规划
         graph.addEdge("delegate", "plan");
         graph.addEdge("tool", "plan");
-
-        // 最终汇总 → 结束
         graph.addEdge("finalize", END);
 
         CompiledGraph<DeepAgentState> compiled = graph.compile(compileConfig);

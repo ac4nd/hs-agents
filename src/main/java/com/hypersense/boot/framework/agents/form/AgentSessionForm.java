@@ -39,4 +39,9 @@ public class AgentSessionForm {
     /** HITL 中断节点列表（默认 ["tool"]） */
     @Schema(description = "HITL 中断节点列表，图执行到这些节点前暂停等待审批", example = "[\"tool\"]")
     private List<String> hitlInterruptNodes;
+
+    /** LLM 模型配置 ID（sys_llm_model_config.id，可空）
+     * <p>为空时按顺序回退：AgentTemplate.defaultModelConfigId → 租户默认模型 → 兜底单例</p> */
+    @Schema(description = "LLM 模型配置 ID（sys_llm_model_config.id，可空）")
+    private Long modelConfigId;
 }

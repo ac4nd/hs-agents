@@ -57,6 +57,18 @@ public class AgentSessionVO {
     private List<String> enabledTools;
 
     /**
+     * 当前会话绑定的 LLM 模型配置 ID（sys_llm_model_config.id）。
+     * <p>
+     * 为 null 时回退兜底 ChatModel（AgentAutoConfiguration 注入的单例）。
+     * 切换模型由 {@code switch-model} 接口或 streamExecute 的 modelConfigId 参数触发，
+     * 同步 invalidate graphCache + 重建图实例。
+     * </p>
+     */
+    @Schema(description = "当前会话绑定的 LLM 模型配置 ID（sys_llm_model_config.id，null 时用默认）")
+    @JsonProperty("modelConfigId")
+    private Long modelConfigId;
+
+    /**
      * 会话内对话历史（role: user/assistant，content: 文本）
      * <p>
      * 用于多轮对话上下文连续性。每次 streamExecute 完成后追加本轮 user 输入与 finalResponse。

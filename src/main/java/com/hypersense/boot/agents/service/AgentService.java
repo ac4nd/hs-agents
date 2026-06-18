@@ -5,6 +5,9 @@ import com.hypersense.boot.framework.agents.form.ApprovalRequest;
 import com.hypersense.boot.framework.agents.model.InterruptContext;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import com.hypersense.boot.framework.agents.vo.AgentSessionVO;
+import com.hypersense.boot.framework.agents.vo.AttachmentVO;
+import com.hypersense.boot.framework.agents.vo.LlmModelOptionVO;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
@@ -43,6 +46,38 @@ public interface AgentService {
      * @return SSE 发射器
      */
     SseEmitter streamExecute(String sessionId, String userInput);
+
+    /**
+     * SSE 流式执行 Agent（可切换模型 + 附件路径透传）。
+     * <p>
+     * modelConfigId 不为空且与当前 session 不一致时，先切换模型（invalidate graphCache + 更新 session），
+     * 再执行本轮对话。modelConfigId 为空时维持当前模型。
+     * </p>
+     * <p>
+     * attachmentPaths 非空时，会把路径作为「已上传附件」上下文提示注入到 userInput 之前，
+     * 引导 Agent 通过 read_file 工具读取沙箱中的附件。
+     * </p>
+     *
+     * @param sessionId       会话 ID
+     * @param userInput       用户输入
+     * @param modelConfigId   可选，sys_llm_model_config.id
+     * @param attachmentPaths 可选，沙箱工作目录中的附件相对路径列表
+     * @return SSE 发射器
+     */
+    SseEmitter streamExecute(String sessionId, String userInput, Long modelConfigId, List<String> attachmentPaths);
+
+    /**
+     * 切换会话绑定的 LLM 模型。
+     * <p>
+     * 校验 modelConfigId 可用后：invalidate graphCache + ChatModelRegistry，
+     * 更新 session.modelConfigId，清空 historySummary（缓解跨模型漂移），持久化。
+     * </p>
+     *
+     * @param sessionId     会话 ID
+     * @param modelConfigId 目标模型配置 ID（sys_llm_model_config.id）
+     * @return 更新后的会话
+     */
+    AgentSessionVO switchModel(String sessionId, Long modelConfigId);
 
     /**
      * 查询会话状态
@@ -103,4 +138,64 @@ public interface AgentService {
      * @param sessionId 会话 ID
      */
     void deleteSession(String sessionId);
+
+    /**
+     * 列出当前租户可用的 LLM 模型（前端切换模型下拉用）。
+     *
+     * @return 模型选项列表（不含敏感信息）
+     */
+    List<LlmModelOptionVO> listAvailableModels();
+
+    /**
+     * 上传会话附件到沙箱工作目录。
+     * <p>
+     * 把每个文件以 {@code uploads/<filename>} 写入 sessionId 对应的沙箱工作目录，
+     * 同名文件自动加序号避免覆盖。前端在调用 streamExecute 时把返回的 path 列表
+     * 通过 {@code attachmentPaths} 参数透传，后端会把路径作为上下文提示注入到 input。
+     * </p>
+     *
+     * @param sessionId 会话 ID
+     * @param files     multipart 文件列表
+     * @return 写入沙箱后的附件信息
+     */
+    List<AttachmentVO> uploadAttachments(String sessionId, List<MultipartFile> files);
+
+    /**
+     * 列出当前会话沙箱工作目录下 {@code uploads/} 子目录的所有附件元信息。
+     *
+     * @param sessionId 会话 ID
+     * @return 附件列表
+     */
+    List<AttachmentVO> listAttachments(String sessionId);
+
+    /**
+     * 读取沙箱工作目录下任意文件的字节内容（用于图片/文本/视频等预览下载）。
+     * <p>
+     * 路径相对 sessionId 对应的沙箱工作目录，底层 {@code LocalSandbox.readAllBytes} 通过
+     * {@code resolveSecurePath} 防越界（normalize 后必须 startsWith workDir）。
+     * </p>
+     *
+     * @param sessionId 会话 ID
+     * @param path      沙箱工作目录内的相对路径（如 {@code uploads/logo.png}、{@code output/result.txt}）
+     * @return 文件字节内容
+     */
+    byte[] readFileBytes(String sessionId, String path);
+
+    /**
+     * 向沙箱工作目录内指定文件写入文本内容（覆盖写入）。
+     * <p>
+     * 用于前端文本/代码 tab 编辑后保存。底层 {@code LocalSandbox.writeFile} 同样做越界防护。
+     * </p>
+     *
+     * @param sessionId 会话 ID
+     * @param path      沙箱工作目录内的相对路径
+     * @param content   文本内容
+     */
+    void writeFileText(String sessionId, String path, String content);
+
+    /**
+     * @deprecated 改用 {@link #readFileBytes(String, String)}，旧方法仅做委托以兼容现有调用方。
+     */
+    @Deprecated
+    byte[] readAttachmentBytes(String sessionId, String path);
 }

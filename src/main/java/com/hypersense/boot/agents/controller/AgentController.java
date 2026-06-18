@@ -7,15 +7,23 @@ import com.hypersense.boot.framework.agents.model.InterruptContext;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import com.hypersense.boot.agents.service.AgentService;
 import com.hypersense.boot.framework.agents.vo.AgentSessionVO;
+import com.hypersense.boot.framework.agents.vo.AttachmentVO;
+import com.hypersense.boot.framework.agents.vo.LlmModelOptionVO;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.CacheControl;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
@@ -50,8 +58,62 @@ public class AgentController {
     @Operation(summary = "SSE 流式执行 Agent")
     @GetMapping(value = "/sessions/{sessionId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamExecute(@PathVariable String sessionId,
-                                    @RequestParam String input) {
-        return agentService.streamExecute(sessionId, input);
+                                    @RequestParam String input,
+                                    @RequestParam(required = false) Long modelConfigId,
+                                    @RequestParam(required = false) List<String> attachmentPaths) {
+        return agentService.streamExecute(sessionId, input, modelConfigId, attachmentPaths);
+    }
+
+    @Operation(summary = "上传会话附件",
+            description = "把文件写入 sessionId 对应的沙箱工作目录 uploads/ 子目录，单文件上限 10MB，单次最多 5 个。返回的 path 列表可在 streamExecute 时通过 attachmentPaths 参数透传，引导 Agent 通过 read_file 工具读取。")
+    @PostMapping(value = "/sessions/{sessionId}/attachments", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Result<List<AttachmentVO>> uploadAttachments(@PathVariable String sessionId,
+                                                        @RequestParam("files") MultipartFile[] files) {
+        List<MultipartFile> fileList = files == null ? Collections.emptyList() : Arrays.asList(files);
+        return Result.success(agentService.uploadAttachments(sessionId, fileList));
+    }
+
+    @Operation(summary = "查询会话附件列表", description = "返回沙箱工作目录 uploads/ 子目录下的所有附件元信息")
+    @GetMapping("/sessions/{sessionId}/attachments")
+    public Result<List<AttachmentVO>> listAttachments(@PathVariable String sessionId) {
+        return Result.success(agentService.listAttachments(sessionId));
+    }
+
+    @Operation(summary = "下载会话沙箱文件二进制内容",
+            description = "返回沙箱工作目录下任意文件（uploads/、output/ 等）的字节流，用于前端图片/PDF/视频/文本等预览。路径相对沙箱工作目录，底层做越界防护。")
+    @GetMapping("/sessions/{sessionId}/attachments/file")
+    public ResponseEntity<byte[]> downloadAttachment(@PathVariable String sessionId,
+                                                     @RequestParam String path) {
+        byte[] data = agentService.readFileBytes(sessionId, path);
+        String fileName = path == null ? "attachment" : path.substring(path.lastIndexOf('/') + 1);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=\"" + fileName + "\"")
+                .header(HttpHeaders.CACHE_CONTROL, CacheControl.maxAge(java.time.Duration.ofHours(1)).cachePublic().getHeaderValue())
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .body(data);
+    }
+
+    @Operation(summary = "写入会话沙箱文件文本内容",
+            description = "把前端 textarea 编辑的文本内容覆盖写入沙箱工作目录内指定文件，用于文本/代码 tab 保存。路径相对沙箱工作目录，底层做越界防护。")
+    @PutMapping(value = "/sessions/{sessionId}/files/content", consumes = MediaType.TEXT_PLAIN_VALUE)
+    public Result<Void> writeFileContent(@PathVariable String sessionId,
+                                         @RequestParam String path,
+                                         @RequestBody String content) {
+        agentService.writeFileText(sessionId, path, content);
+        return Result.success();
+    }
+
+    @Operation(summary = "查询可用模型列表", description = "返回当前租户下启用的 LLM 模型，供前端切换使用")
+    @GetMapping("/models")
+    public Result<List<LlmModelOptionVO>> listModels() {
+        return Result.success(agentService.listAvailableModels());
+    }
+
+    @Operation(summary = "切换会话模型", description = "切换会话绑定的 LLM 模型（session 级，影响后续所有轮次）")
+    @PostMapping("/sessions/{sessionId}/switch-model")
+    public Result<AgentSessionVO> switchModel(@PathVariable String sessionId,
+                                              @RequestParam Long modelConfigId) {
+        return Result.success(agentService.switchModel(sessionId, modelConfigId));
     }
 
     @Operation(summary = "查询会话状态")

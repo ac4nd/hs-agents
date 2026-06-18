@@ -34,6 +34,13 @@ public class RouteAfterPlan implements EdgeAction<DeepAgentState> {
             return StateGraph.END;
         }
 
+        // 简单回复短路：PlanNode DIRECT_REPLY 已写入 FINAL_RESPONSE，
+        // 跳过 finalize 节点（避免 MemoryMiddleware 事实提取 LLM 调用与 NODE_EXECUTION 噪音）
+        if (state.finalResponse().isPresent() && !state.finalResponse().get().isBlank()) {
+            log.info("RouteAfterPlan: 检测到 DIRECT_REPLY 直接回复 → END（跳过汇总）");
+            return StateGraph.END;
+        }
+
         List<TodoItem> todos = state.todos();
 
         if (todos.isEmpty()) {
