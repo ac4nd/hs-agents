@@ -2,6 +2,7 @@ package com.hypersense.boot.agents.service;
 
 import com.hypersense.boot.framework.agents.form.AgentSessionForm;
 import com.hypersense.boot.framework.agents.form.ApprovalRequest;
+import com.hypersense.boot.framework.agents.form.SessionMetaForm;
 import com.hypersense.boot.framework.agents.model.InterruptContext;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import com.hypersense.boot.framework.agents.vo.AgentSessionVO;
@@ -62,9 +63,14 @@ public interface AgentService {
      * @param userInput       用户输入
      * @param modelConfigId   可选，sys_llm_model_config.id
      * @param attachmentPaths 可选，沙箱工作目录中的附件相对路径列表
+     * @param designSystemId 可选，设计系统主键；非空时把对应 brandSpec/codeSpec 拼到 System 指令前。
+     *                        配合 designSystemType 一起使用：type=personal 查 sys_design_system_config，
+     *                        type=template 查 sys_design_system_config_template
+     * @param designSystemType 可选，设计系统类型：personal（个人）/ template（官方模板）。缺省时按 personal 处理
      * @return SSE 发射器
      */
-    SseEmitter streamExecute(String sessionId, String userInput, Long modelConfigId, List<String> attachmentPaths);
+    SseEmitter streamExecute(String sessionId, String userInput, Long modelConfigId, List<String> attachmentPaths,
+                             Long designSystemId, String designSystemType);
 
     /**
      * 切换会话绑定的 LLM 模型。
@@ -126,11 +132,24 @@ public interface AgentService {
     InterruptContext getInterruptContext(String sessionId);
 
     /**
-     * 查询当前用户的所有会话列表
+     * 查询当前登录用户的全部会话列表.
      *
      * @return 会话列表
      */
     java.util.List<AgentSessionVO> listSessions();
+
+    /**
+     * 更新会话元数据（title / pinned 部分更新，回写 Redis）。
+     * <p>
+     * 任一参数为 null 表示不更新该字段；会话不存在或越权访问时抛业务异常。
+     * </p>
+     *
+     * @param sessionId 会话 ID
+     * @param title     新标题（可空，null 表示不更新）
+     * @param pinned    新置顶状态（可空，null 表示不更新）
+     * @return 更新后的会话
+     */
+    AgentSessionVO updateSessionMeta(String sessionId, String title, Boolean pinned);
 
     /**
      * 删除会话
@@ -198,4 +217,16 @@ public interface AgentService {
      */
     @Deprecated
     byte[] readAttachmentBytes(String sessionId, String path);
+
+    /**
+     * 读取会话当前绑定的 LLM 模型配置 ID（sys_llm_model_config.id）。
+     * <p>
+     * 供沙箱内工具（如 FileReadTool）按模型能力（supports_vision 等）分流处理使用。
+     * session 不存在或未绑定模型时返回 null。
+     * </p>
+     *
+     * @param sessionId 会话 ID
+     * @return modelConfigId，可能为 null
+     */
+    Long getSessionModelConfigId(String sessionId);
 }

@@ -1,6 +1,7 @@
 package com.hypersense.boot.framework.agents.service.impl;
 
 import cn.hutool.core.util.StrUtil;
+import com.hypersense.boot.agents.service.AgentSessionService;
 import com.hypersense.boot.agents.service.impl.AgentServiceImpl;
 import com.hypersense.boot.common.constant.RedisConstants;
 import com.hypersense.boot.common.exception.BusinessException;
@@ -63,7 +64,7 @@ class AgentServiceImplTest {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
 
         TaskExecutor taskExecutor = Runnable::run; // 同步执行器（测试用）
-        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null);
+        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(AgentSessionService.class));
 
         // Mock SecurityUtils.getUserId() 静态方法
         securityUtilsMock = mockStatic(SecurityUtils.class);

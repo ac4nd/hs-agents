@@ -51,7 +51,13 @@ public class RepeatSubmitAspect {
 
         boolean locked = lock.tryLock(0, expire, TimeUnit.SECONDS);
         if (!locked) {
-            throw new BusinessException(ResultCode.DUPLICATE_SUBMISSION);
+            String msg = repeatSubmit.message();
+            if (msg == null || msg.isEmpty() || "请勿重复提交".equals(msg)) {
+                // 默认文案走原路径（保持行为等价）
+                throw new BusinessException(ResultCode.DUPLICATE_SUBMISSION);
+            }
+            // 自定义文案覆盖 message
+            throw new BusinessException(ResultCode.DUPLICATE_SUBMISSION, msg);
         }
         return pjp.proceed();
     }

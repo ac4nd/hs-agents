@@ -41,9 +41,18 @@ public class DeepAgentState extends AgentState {
     public static final String FINAL_RESPONSE = "final_response";
     public static final String INSTRUCTIONS = "instructions";
     public static final String ITERATION_COUNT = "iteration_count";
+    /** Plan 节点周期计数（每进入一次 plan 节点递增），用于检测异常 plan 循环 */
+    public static final String PLAN_CYCLE_COUNT = "plan_cycle_count";
     public static final String ENABLED_TOOLS = "enabled_tools";
     public static final String EXECUTE_STRATEGY = "execute_strategy";
     public static final String SESSION_ID = "session_id";
+
+    /**
+     * 用户本轮上传的附件路径列表（沙箱相对路径）。
+     * <p>用于 Plan/Finalize 等不接 tools 的节点按需把图片作为 ImageContent 直接附加到 LLM 调用，
+     * 避免「附件只存在于首条 UserMessage、被节点纯文本重拼丢弃」的链路断点。</p>
+     */
+    public static final String ATTACHMENT_PATHS = "attachment_paths";
 
     /** 压缩后的对话摘要（由 MessageCompressionMiddleware 写入） */
     public static final String COMPRESSED_CONTEXT = "compressed_context";
@@ -103,9 +112,11 @@ public class DeepAgentState extends AgentState {
             Map.entry(FINAL_RESPONSE, Channels.base((Supplier<String>) () -> "")),
             Map.entry(INSTRUCTIONS, Channels.base((Supplier<String>) () -> "")),
             Map.entry(ITERATION_COUNT, Channels.base((Reducer<Integer>) (current, update) -> update, () -> 0)),
+            Map.entry(PLAN_CYCLE_COUNT, Channels.base((Reducer<Integer>) (current, update) -> update, () -> 0)),
             Map.entry(ENABLED_TOOLS, Channels.base((Supplier<List<String>>) ArrayList::new)),
             Map.entry(EXECUTE_STRATEGY, Channels.base((Supplier<String>) () -> "direct")),
             Map.entry(SESSION_ID, Channels.base((Supplier<String>) () -> "")),
+            Map.entry(ATTACHMENT_PATHS, Channels.base((Supplier<List<String>>) ArrayList::new)),
             Map.entry(COMPRESSED_CONTEXT, Channels.base((Supplier<String>) () -> "")),
             Map.entry(DELEGATION_DEPTH, Channels.base((Reducer<Integer>) (current, update) -> update, () -> 0)),
             // HITL 状态通道
@@ -194,6 +205,14 @@ public class DeepAgentState extends AgentState {
     }
 
     /**
+     * 获取 plan 节点周期计数（每进入一次 plan 节点递增）。
+     * 用于检测异常 plan 循环（如重复规划已完成的 TODO）。
+     */
+    public int planCycleCount() {
+        return this.<Integer>value(PLAN_CYCLE_COUNT).orElse(0);
+    }
+
+    /**
      * 获取启用的工具列表
      */
     @SuppressWarnings("unchecked")
@@ -213,6 +232,14 @@ public class DeepAgentState extends AgentState {
      */
     public String sessionId() {
         return this.<String>value(SESSION_ID).orElse("");
+    }
+
+    /**
+     * 获取本轮附件路径列表（沙箱相对路径）。用于节点按需把图片以 ImageContent 形式附加到 LLM 调用。
+     */
+    @SuppressWarnings("unchecked")
+    public List<String> attachmentPaths() {
+        return this.<List<String>>value(ATTACHMENT_PATHS).orElse(List.of());
     }
 
     /**

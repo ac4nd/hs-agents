@@ -37,8 +37,11 @@ import static org.bsc.langgraph4j.action.AsyncNodeAction.node_async;
  * 组装 DeepAgents 的核心执行图：
  * </p>
  * <pre>
- * START → plan → [route] → execute → [route] → delegate/tool → plan → ... → finalize → END
+ * START → plan → [route] → execute → [route] → tool → execute → tool → ... → finalize → END
+ *                                   ↘ delegate → plan → ...（保留：委派分支仍回 plan）
  * </pre>
+ * <p>关键改造：取消 plan→execute→tool→plan 默认循环，改为 tool→execute 让 ExecuteNode
+ * 自己选下一个 PENDING TODO；delegate 分支仍可回 plan（子 Agent 流程需要）。</p>
  *
  * @author Claude
  * @since 2026/5/15
@@ -114,15 +117,27 @@ public class DeepAgentGraph {
      * @param hitlConfig   HITL 配置（null 或 hitlEnabled=false 时不配置中断）
      */
     public CompiledGraph<DeepAgentState> build(ChatModel sessionModel, HitlBuildConfig hitlConfig) throws GraphStateException {
+        return build(sessionModel, null, hitlConfig);
+    }
+
+    /**
+     * 推荐 build 入口：同时接收同步与流式 ChatModel。
+     * <p>streamingModel 非空时注入到 ToolNode，使长内容生成走 SSE 流式，规避同步整体超时。</p>
+     */
+    public CompiledGraph<DeepAgentState> build(ChatModel sessionModel,
+                                               dev.langchain4j.model.chat.StreamingChatModel streamingModel,
+                                               HitlBuildConfig hitlConfig) throws GraphStateException {
         ChatModel effectiveModel = sessionModel != null ? sessionModel : this.chatModel;
-        log.info("构建 Deep Agent 执行图, hitlEnabled={}, sessionModelBound={}",
-                hitlConfig != null && hitlConfig.hitlEnabled, sessionModel != null);
+        log.info("构建 Deep Agent 执行图, hitlEnabled={}, sessionModelBound={}, streamingEnabled={}",
+                hitlConfig != null && hitlConfig.hitlEnabled, sessionModel != null, streamingModel != null);
 
         // 通过 NodeFactory 按 session 模型构造节点；sessionModel 为空时使用兜底单例
         PlanNode sessionPlanNode = nodeFactory.planNode(effectiveModel);
         ExecuteNode sessionExecuteNode = nodeFactory.executeNode(effectiveModel);
         FinalizeNode sessionFinalizeNode = nodeFactory.finalizeNode(effectiveModel);
         DelegateNode delegateNode = nodeFactory.delegateNode(effectiveModel);
+        // session 级 ToolNode：注入 streamingModel，避免长输出整体超时
+        ToolNode sessionToolNode = nodeFactory.toolNode(effectiveModel, streamingModel);
 
         // 构建编译配置
         var configBuilder = CompileConfig.builder()
@@ -155,7 +170,7 @@ public class DeepAgentGraph {
         graph.addNode("plan", node_async(planWithMemory));
         graph.addNode("execute", node_async(sessionExecuteNode));
         graph.addNode("delegate", node_async(delegateNode));
-        graph.addNode("tool", node_async(toolNode));
+        graph.addNode("tool", node_async(sessionToolNode));
 
         NodeAction<DeepAgentState> wrappedFinalizeNode = memoryMiddleware
                 .map(mw -> wrapWithMemoryMiddleware("finalize", sessionFinalizeNode, mw))
@@ -170,7 +185,9 @@ public class DeepAgentGraph {
                 edge_async(routeAfterExecute),
                 Map.of("delegate", "delegate", "tool", "tool", "plan", "plan"));
         graph.addEdge("delegate", "plan");
-        graph.addEdge("tool", "plan");
+        // 取消 plan 循环：工具完成后直接回 execute，由 ExecuteNode 选下一个 PENDING TODO。
+        // 终止性由 RouteAfterExecute 的 allDone 短路 → finalize 保证。
+        graph.addEdge("tool", "execute");
         graph.addEdge("finalize", END);
 
         CompiledGraph<DeepAgentState> compiled = graph.compile(compileConfig);

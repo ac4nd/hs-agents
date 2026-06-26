@@ -135,6 +135,50 @@ public class MinioFileService implements FileService {
 
 
     /**
+     * 以输入流方式上传文件，并指定对象 key（不做 UUID 重命名）。
+     *
+     * <p>用于把已经知道目标路径的流式内容（例如场景模板的 example.html）上传到固定 key。</p>
+     * <p>注意：此方法未加入 {@link FileService} 接口，避免阿里云/本地实现被迫新增空实现。
+     * 调用方需直接注入 {@link MinioFileService}（minio 模式下唯一存在的 FileService Bean）。</p>
+     *
+     * @param inputStream 输入流（调用方负责关闭）
+     * @param size        字节数；未知时传 -1，由内部按分片读取
+     * @param objectKey   对象 key（不含 bucketName），例如 {@code scene-template/0/blog-post.html}
+     * @param contentType MIME，例如 {@code text/html}
+     * @return 可访问的 URL（与 {@link #uploadFile(MultipartFile)} 返回值格式一致）
+     */
+    public String uploadStream(InputStream inputStream, long size, String objectKey, String contentType) {
+        createBucketIfAbsent(bucketName);
+        try {
+            PutObjectArgs putObjectArgs = PutObjectArgs.builder()
+                    .bucket(bucketName)
+                    .object(objectKey)
+                    .contentType(contentType)
+                    // size 为 -1 时 MinIO 会以分片方式读取（5MiB partSize）
+                    .stream(inputStream, size, size < 0 ? 10 * 1024 * 1024 : -1)
+                    .build();
+            minioClient.putObject(putObjectArgs);
+
+            String fileUrl;
+            if (StrUtil.isBlank(customDomain)) {
+                GetPresignedObjectUrlArgs getPresignedObjectUrlArgs = GetPresignedObjectUrlArgs.builder()
+                        .bucket(bucketName)
+                        .object(objectKey)
+                        .method(Method.GET)
+                        .build();
+                fileUrl = minioClient.getPresignedObjectUrl(getPresignedObjectUrlArgs);
+                fileUrl = fileUrl.substring(0, fileUrl.indexOf("?"));
+            } else {
+                fileUrl = customDomain + "/" + bucketName + "/" + objectKey;
+            }
+            return fileUrl;
+        } catch (Exception e) {
+            log.error("上传流失败, objectKey={}", objectKey, e);
+            throw new BusinessException(ResultCode.UPLOAD_FILE_EXCEPTION, e.getMessage());
+        }
+    }
+
+    /**
      * 删除文件
      *
      * @param filePath 文件完整路径

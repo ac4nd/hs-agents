@@ -97,13 +97,46 @@ public class SandboxTool implements ToolProvider {
     public ToolSpecification specification() {
         return ToolSpecification.builder()
                 .name("sandbox")
-                .description("沙箱文件操作：支持 read_file/write_file/list_files/delete_file。args 内 operation 决定具体动作")
+                .description(description())
                 .parameters(JsonObjectSchema.builder()
-                        .addStringProperty("operation", "read_file | write_file | list_files | delete_file")
-                        .addStringProperty("filename", "操作的目标文件名（write_file/delete_file 时必填）")
-                        .addStringProperty("path", "读取/删除的相对路径（read_file/delete_file 时必填）")
-                        .addStringProperty("content", "写入内容（write_file 时必填）")
-                        .required(List.of("operation"))
+                        .addStringProperty("action",
+                                "必填。操作类型，取值：" +
+                                "execute_code（执行代码，需配合 language+code）、" +
+                                "read_file（读取文件，需配合 path）、" +
+                                "write_file（写入文件，需配合 path+content）、" +
+                                "edit_file（编辑文件，文本替换用 oldString+newString，行级替换用 startLine+endLine+newContent）、" +
+                                "list_dir（列出目录，需配合 path，默认当前目录）、" +
+                                "glob（文件名模式搜索，需配合 pattern，可带 path）、" +
+                                "grep（文件内容正则搜索，需配合 pattern，可带 path+includePattern）、" +
+                                "run_command（执行 Shell 命令，需配合 command）。")
+                        .addStringProperty("language",
+                                "execute_code 时必填。编程语言，如 python/javascript/shell 等。")
+                        .addStringProperty("code",
+                                "execute_code 时必填。待执行的源代码字符串（保留原始缩进）。")
+                        .addStringProperty("path",
+                                "read_file/write_file/edit_file/list_dir/glob/grep 时必填。沙箱内相对路径，" +
+                                "如 uploads/xxx.html、workspace/file.py。list_dir/glob/grep 时缺省为当前目录。")
+                        .addStringProperty("content",
+                                "write_file 时必填。要写入的完整文件内容。")
+                        .addStringProperty("command",
+                                "run_command 时必填。Shell 命令字符串。")
+                        .addStringProperty("oldString",
+                                "edit_file 文本替换模式必填。被替换的原始文本片段（精确匹配）。")
+                        .addStringProperty("newString",
+                                "edit_file 文本替换模式必填。替换后的新文本片段。")
+                        .addIntegerProperty("startLine",
+                                "edit_file 行级替换模式必填。起始行号（1-based）。")
+                        .addIntegerProperty("endLine",
+                                "edit_file 行级替换模式必填。结束行号（1-based）。")
+                        .addStringProperty("newContent",
+                                "edit_file 行级替换模式必填。替换 [startLine, endLine] 区间的新内容。")
+                        .addStringProperty("pattern",
+                                "glob/grep 时必填。glob 用通配符如 **/*.py、*.json；grep 用正则表达式。")
+                        .addStringProperty("includePattern",
+                                "grep 时可选。限定搜索的文件名模式，如 *.java。")
+                        .addIntegerProperty("timeout",
+                                "execute_code 时可选。超时秒数（默认由沙箱配置决定）。")
+                        .required(List.of("action"))
                         .build())
                 .build();
     }

@@ -40,6 +40,12 @@ public enum AgentEventType {
     ERROR("error"),
     /** 节点执行 */
     NODE_EXECUTION("node_execution"),
+    /** 文件已创建（file_write 成功落盘后通知前端刷新附件列表） */
+    FILE_CREATED("file_created"),
+    /** 工具调用错误（透传工具失败原因给前端） */
+    TOOL_ERROR("tool_error"),
+    /** 审计警告（Finalize 输出含编造路径等违规内容时通知前端） */
+    AUDIT_WARNING("audit_warning"),
     // ========== HITL 事件类型 ==========
     /** HITL 中断（等待人工审批） */
     INTERRUPT("interrupt"),

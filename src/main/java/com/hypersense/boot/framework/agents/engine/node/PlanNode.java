@@ -10,6 +10,7 @@ import com.hypersense.boot.framework.agents.model.AgentEvent;
 import com.hypersense.boot.framework.agents.model.DeepAgentState;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import com.hypersense.boot.framework.agents.enums.TodoStatus;
+import com.hypersense.boot.framework.agents.serializer.AttachmentContext;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.data.message.SystemMessage;
@@ -55,9 +56,25 @@ public class PlanNode implements NodeAction<DeepAgentState> {
     private final ChatModel chatModel;
     private final HitlGateChecker hitlGateChecker;
     private final AgentProperties agentProperties;
+    private final AttachmentContext attachmentContext;
 
     /** 连续解析失败的最大容忍次数，超过后将所有 PENDING TODO 标记为 FAILED 以打破循环 */
     private static final int MAX_PARSE_FAILURES = 3;
+
+    /** TODO 校验失败后给 LLM 的重试上限（含首次规划，最多 2 次重新规划） */
+    private static final int MAX_TODO_VALIDATION_RETRIES = 2;
+
+    /** plan 周期上限：允许 1 次规划 + 1 次复用，第 3 次进入仍需重新规划即视为漂移强制终止 */
+    private static final int MAX_PLAN_CYCLES = 2;
+
+    /**
+     * DIRECT_REPLY 短路时，编码预设回复内容的标记 token。
+     * <p>
+     * 用一对 token 把 LLM 在 plan 阶段生成的回复正文包起来嵌入 TODO 描述，
+     * 便于 ToolNode 的 function-call LLM 识别"原样使用"的内容范围，避免改写或总结。
+     * </p>
+     */
+    private static final String DIRECT_REPLY_PRESET_MARKER = "<PRESET_REPLY_CONTENT>";
 
     private static final String PLAN_SYSTEM_PROMPT = """
             你是任务规划专家。先判断用户指令的复杂度，再决定响应方式。
@@ -85,6 +102,8 @@ public class PlanNode implements NodeAction<DeepAgentState> {
             - 用户已有信息范围内的纯知识问答（"什么是闭包"、"解释 Transformer 原理"）
             - 对历史对话的澄清/确认（"我刚才说的是…"、"明白了"）
             - 基于历史内容的小幅补充说明，无需新外部信息或工具调用
+            注：DIRECT_REPLY 的回复内容会由后端构造为 reply_text 工具调用 TODO 走 ToolNode 执行，
+            使所有输出都经工具留痕、可审计。LLM 只需关注回复正文质量。
 
             【输出格式】严格二选一，不要任何额外解释、markdown 包裹：
             - DIRECT_REPLY: <自然回复正文>
@@ -98,24 +117,110 @@ public class PlanNode implements NodeAction<DeepAgentState> {
 
             【示例 3】用户指令="查询福州今天的天气"
             输出：
-            TODO: 使用网络搜索工具查询福州今日天气
-            TODO: 汇总天气信息回复用户
+            TODO: 使用 internet_search 工具查询福州今日天气
+            TODO: 使用 reply_text 工具汇总天气信息回复用户
 
             【示例 4】用户指令="最新 AI 新闻有哪些"
             输出：
-            TODO: 使用网络搜索工具查询最新 AI 新闻
-            TODO: 整理新闻要点回复用户
+            TODO: 使用 internet_search 工具查询最新 AI 新闻
+            TODO: 使用 reply_text 工具整理新闻要点回复用户
 
             【示例 5】用户指令="帮我生成一个 Python 数据清洗脚本并保存到 data_clean.py"
             输出：
             TODO: 设计数据清洗逻辑
-            TODO: 编写 Python 脚本并保存为 data_clean.py
+            TODO: 使用 file_write 工具编写 Python 脚本并保存为 data_clean.py
+
+            工具使用规则（强制）：
+            1. 每个 TODO 必须明确引用一个工具（file_write / file_read / internet_search / sandbox / reply_text / delegate）
+            2. 禁止生成"直接保存/直接生成/直接执行"类 TODO，必须改为"使用 file_write 工具保存"
+            3. 工具名必须在系统内置工具集中，引用未注册工具会被拒绝
+            4. 禁止在 TODO 描述中包含操作结果（如"已保存"），结果由工具实际执行后产生
+            5. 问候、知识问答、解释、总结类需求必须使用 reply_text 工具
+            6. file_read 类 TODO 的目标文件名必须来自上下文中真实存在的文件（如用户明确上传/提及、或前序步骤实际生成的产物）；
+               严禁凭空假设工作空间中存在某个文件（例如未经用户确认就规划"读取 prototype.html / protype.html / template.html"）。
+               若不确定文件是否存在，应改为直接基于用户需求和【最近对话】内容原创生成，而不是 file_read。
+            7. 当用户请求是"把上面那个设计/方案/代码落地为 HTML/文件并保存"时，必须规划 file_write TODO，
+               由 LLM 原创/汇总生成完整 content，禁止以"等待前序产出"为由跳过。
+            8. file_write TODO 中禁止出现任何路径前缀（如 /home/user/、/tmp/、/var/workspace/、C:\\、~/），
+               只允许描述"保存为 xxx.html"（仅文件名）。系统会自动写入沙箱工作目录的 uploads/ 子目录。
+               违反该规则的 TODO 会被后端拒绝。
+            9. 【原创产物即时落盘原则】凡是要生成 HTML/CSS/JS/代码/文档/报告等产物的请求，
+               必须在【同一轮 TODO 计划内】安排 file_write TODO 并由 LLM 在该步骤直接产出完整 content 落盘。
+               严禁先用 reply_text 把"设计方案/代码大纲"输出给用户、再等下一轮才保存——会话记忆不可靠，跨轮必丢内容。
+               正确做法：TODO1=使用 file_write 工具原创生成 xxx 并保存为 xxx.html；TODO2=使用 reply_text 工具告知用户已保存。
+               禁止把"先生成内容文本回复用户"作为单独 TODO。
+            10. 【指令模糊必澄清原则】出现以下任一情形时，必须只生成一个 reply_text 工具的 CLARIFY TODO（replyType=CLARIFY），
+                询问清楚后再进入实质执行，禁止自行编造或猜测：
+                a. 用户要【修改/覆盖】某个【已存在】文件但工作空间有多个候选文件且指代不明
+                   （如"修改刚才那个"但 state.files 中有 2 个以上文件）；
+                b. 用户指令出现"按上面风格/类似刚才那个/接着做"等指代词，但【最近对话】和【上下文区块】中都找不到明确指代对象；
+                c. 用户要求修改一个工作空间中【不存在】的文件，且未说明是否新建；
+                d. 用户要求读取/查询明确不存在的外部资源（如某未上传文件、未指定 URL）。
+                【注意：以下情形【不属于】模糊指令，禁止 CLARIFY】
+                - 用户要做【原创设计/生成/创建】类请求（如"设计一个宠物领养页面"、"生成一个 Python 脚本"），
+                  即使未指定文件名、未指定风格细节，也【必须直接执行】：由 LLM 自主命名 + 基于通用最佳实践产出，
+                  系统底层有自动命名兜底。原创场景禁止以"未指定文件名/风格/配色"为由 CLARIFY。
+                - 用户提到"当前设计方案/当前设计系统/当前风格"等指代【设计模式上下文】时，
+                  该上下文已由后端通过 instructions 注入，LLM 必须直接从用户指令中查找，
+                  找到就立即基于其执行，找不到再 CLARIFY。
+            11. 【一次成型原则】LLM 在 file_write 步骤产出的 content 必须是【完整、可直接运行/使用的最终内容】，
+                不允许先写"骨架版"再下一轮补充。若用户未提细节，按行业最佳实践 + 用户明确给出的约束补全。
+            12. 【单文件原创原则】凡是「设计/创建/生成 HTML 页面或单个产物文件」类原创需求，
+                必须只规划【恰好 1 个】file_write TODO 落盘整个产物。
+                禁止把一个页面拆成多个 file_write TODO（如先生成 layout.html 再生成 components.html）。
+                正确做法：1 个 file_write TODO 输出完整 HTML（含所有 section、样式、脚本）+ 1 个 reply_text TODO 告知用户。
+                违反此规则的「拆分式多文件 TODO」会被后端拒绝。
             """;
 
     @Override
     public Map<String, Object> apply(DeepAgentState state) {
         log.info("PlanNode: 开始规划任务");
         emit(AgentEventType.NODE_EXECUTION, "规划节点开始", Map.of("node", "plan"));
+
+        // === plan 周期计数（双保险防漂移，与 RouteAfterPlan 共享）===
+        // 即使 plan_cycle_count 未在 SCHEMA 注册，langgraph4j AgentState 基于可变 Map，
+        // 未声明 key 仍可直接覆盖写入；若被丢弃则保险 2（RouteAfterPlan 的 todos 兜底）仍生效。
+        int planCycleCount;
+        try {
+            planCycleCount = state.<Integer>value(DeepAgentState.PLAN_CYCLE_COUNT).orElse(0) + 1;
+        } catch (ClassCastException cce) {
+            log.warn("PlanNode: plan_cycle_count 类型异常，回退为 1: {}", cce.getMessage());
+            planCycleCount = 1;
+        }
+        log.info("PlanNode: 进入 plan 节点, plan_cycle_count={}", planCycleCount);
+
+        // === 终止性短路 1（最优先，零 LLM 调用）：todos 全部 COMPLETED/FAILED → 直接 finalize ===
+        // 这是修复「一次需求触发多次 plan 循环」的核心保险：一旦所有 TODO 都已结束，
+        // 任何后续 LLM 调用都可能因为描述漂移导致 findExistingStatus 失败、COMPLETED 被重新标 PENDING。
+        List<TodoItem> existingTodos = state.todos();
+        if (existingTodos != null && !existingTodos.isEmpty()) {
+            boolean allDone = existingTodos.stream().allMatch(t ->
+                    t.getStatus() == TodoStatus.COMPLETED || t.getStatus() == TodoStatus.FAILED);
+            if (allDone) {
+                log.warn("PlanNode: 所有 TODO 已结束，强制跳过 LLM 重新规划，进入 finalize. planCycleCount={}",
+                        planCycleCount);
+                Map<String, Object> doneResult = new HashMap<>();
+                doneResult.put(DeepAgentState.TODOS, existingTodos);
+                doneResult.put(DeepAgentState.MESSAGES, AiMessage.from("所有任务已完成"));
+                doneResult.put(DeepAgentState.PLAN_CYCLE_COUNT, planCycleCount);
+                return doneResult;
+            }
+        }
+
+        // === 终止性短路 2（防漂移保护）：plan 周期超过上限强制终止 ===
+        // 正常流程 1 次规划即可走完全部 TODO；复用场景至多再加 1 次。
+        // 第 3 次进入 plan 仍需 LLM 规划，意味着状态机已漂移，必须终止。
+        if (planCycleCount > MAX_PLAN_CYCLES) {
+            log.error("PlanNode: 检测到 plan 循环 {} 次，疑似异常，强制终止. todos={}",
+                    planCycleCount, existingTodos);
+            Map<String, Object> driftResult = new HashMap<>();
+            if (existingTodos != null) {
+                driftResult.put(DeepAgentState.TODOS, existingTodos);
+            }
+            driftResult.put(DeepAgentState.MESSAGES, AiMessage.from("已达到 plan 循环上限，终止"));
+            driftResult.put(DeepAgentState.PLAN_CYCLE_COUNT, planCycleCount);
+            return driftResult;
+        }
 
         // 迭代上限保护：超过配置的 max-iterations 强制 finalize，避免 plan↔execute 空转
         int iteration = state.iterationCount();
@@ -131,40 +236,30 @@ public class PlanNode implements NodeAction<DeepAgentState> {
                             .assignedAgent(t.getAssignedAgent()).updatedAt(LocalDateTime.now()).build()
                             : t)
                     .toList();
-            return Map.of(
-                    DeepAgentState.TODOS, frozenTodos,
-                    DeepAgentState.MESSAGES, AiMessage.from(msg)
-            );
+            Map<String, Object> iterResult = new HashMap<>();
+            iterResult.put(DeepAgentState.TODOS, frozenTodos);
+            iterResult.put(DeepAgentState.MESSAGES, AiMessage.from(msg));
+            iterResult.put(DeepAgentState.PLAN_CYCLE_COUNT, planCycleCount);
+            return iterResult;
         }
 
-        // 短路：已存在 todos 且全部已结束（COMPLETED/FAILED）→ 不再调用 LLM 重新规划，
-        // 保留原状态让 RouteAfterPlan 路由到 finalize，避免无谓的 LLM 调用和描述漂移
-        List<TodoItem> existingTodos = state.todos();
-        if (!existingTodos.isEmpty()) {
-            boolean allDone = existingTodos.stream().allMatch(t ->
-                    t.getStatus() == TodoStatus.COMPLETED || t.getStatus() == TodoStatus.FAILED);
-            if (allDone) {
-                log.info("PlanNode: 所有 TODO 已结束，跳过 LLM 重新规划，直接进入 finalize");
-                return Map.of(
-                        DeepAgentState.TODOS, existingTodos,
-                        DeepAgentState.MESSAGES, AiMessage.from("所有任务已完成")
-                );
-            }
-            // 已有 todos 且至少一个处于 PENDING/IN_PROGRESS 时，跳过 LLM 重新规划，
-            // 保留原 todos 让 RouteAfterPlan 路由到 execute 继续推进；
-            // 避免 LLM 描述漂移（如"搜索"→"查询"）导致 findExistingStatus 精确匹配失败，
-            // 已 COMPLETED 的 TODO 被当作新 PENDING 重新生成 → 死循环
+        // 短路：已有 todos 且至少一个处于 PENDING/IN_PROGRESS 时，跳过 LLM 重新规划，
+        // 保留原 todos 让 RouteAfterPlan 路由到 execute 继续推进；
+        // 避免 LLM 描述漂移（如"搜索"→"查询"）导致 findExistingStatus 精确匹配失败，
+        // 已 COMPLETED 的 TODO 被当作新 PENDING 重新生成 → 死循环
+        if (existingTodos != null && !existingTodos.isEmpty()) {
             boolean hasPending = existingTodos.stream().anyMatch(t ->
                     t.getStatus() == TodoStatus.PENDING || t.getStatus() == TodoStatus.IN_PROGRESS);
             if (hasPending) {
-                log.info("PlanNode: 已有 {} 个 TODO 含未完成项，跳过 LLM 重新规划，继续推进执行",
-                        existingTodos.size());
+                log.info("PlanNode: 已有 {} 个 TODO 含未完成项，跳过 LLM 重新规划，继续推进执行. planCycleCount={}",
+                        existingTodos.size(), planCycleCount);
                 emit(AgentEventType.NODE_EXECUTION, "继续执行现有计划",
                         Map.of("node", "plan", "todos", existingTodos));
-                return Map.of(
-                        DeepAgentState.TODOS, existingTodos,
-                        DeepAgentState.MESSAGES, AiMessage.from("继续执行现有计划")
-                );
+                Map<String, Object> pendingResult = new HashMap<>();
+                pendingResult.put(DeepAgentState.TODOS, existingTodos);
+                pendingResult.put(DeepAgentState.MESSAGES, AiMessage.from("继续执行现有计划"));
+                pendingResult.put(DeepAgentState.PLAN_CYCLE_COUNT, planCycleCount);
+                return pendingResult;
             }
         }
 
@@ -192,27 +287,53 @@ public class PlanNode implements NodeAction<DeepAgentState> {
                 """, instructions, existingSummary);
 
         // 调用 LLM 生成计划
+        // 若本轮有图片附件且模型支持视觉，附加 ImageContent 让 LLM 能真正"看到"图片
+        UserMessage planUserMessage = attachmentContext
+                .buildMultimodal(state.sessionId(), userPrompt, state.attachmentPaths())
+                .orElseGet(() -> UserMessage.from(userPrompt));
         List<ChatMessage> messages = List.of(
                 SystemMessage.from(PLAN_SYSTEM_PROMPT),
-                UserMessage.from(userPrompt)
+                planUserMessage
         );
 
-        ChatResponse response = chatModel.chat(messages);
+        ChatResponse response = attachmentContext.chatWithVisionFallback(
+                chatModel, messages, state.sessionId(), userPrompt);
         String planText = response.aiMessage().text();
         log.debug("PlanNode: LLM 规划结果\n{}", planText);
 
-        // 短路：LLM 直接回复简单对话（DIRECT_REPLY: 前缀），跳过 TODO 计划
+        // 短路：LLM 直接回复简单对话（DIRECT_REPLY: 前缀）
+        // 废除 direct 后的改造：不再让 LLM 直接产出文本作为 FINAL_RESPONSE，
+        // 而是构造一个虚拟的 reply_text 工具调用 TODO，走正常 ToolNode 执行，
+        // 使所有输出都经工具留痕、可审计。
+        // 注意：不写入 FINAL_RESPONSE 通道，避免 RouteAfterPlan 短路到 END 跳过 ToolNode。
         String directReply = parseDirectReply(planText);
         if (directReply != null) {
-            log.info("PlanNode: 检测到简单对话，直接回复用户（不进入 TODO 流程）");
+            log.info("PlanNode: 检测到简单对话，构造虚拟 reply_text TODO 走 ToolNode 执行（不再直接产 FINAL_RESPONSE）");
+            // 把 LLM 在 plan 阶段生成的回复内容编码到 TODO 描述中，
+            // ToolNode 的 buildUserPrompt 会把 TODO 描述拼给 function-call LLM，
+            // 引导其选择 reply_text 工具并把这段内容填入 content 参数。
+            // 标记前缀让 ToolNode / 校验器能识别这是预设好的回复 TODO。
+            String todoDesc = "使用 reply_text 工具回复用户（replyType=GREETING），"
+                    + "content 参数必须原样使用以下内容（不要改写/总结）:\n"
+                    + DIRECT_REPLY_PRESET_MARKER + directReply + DIRECT_REPLY_PRESET_MARKER;
+            TodoItem replyTodo = TodoItem.builder()
+                    .id(UUID.randomUUID().toString().substring(0, 8))
+                    .description(todoDesc)
+                    .status(TodoStatus.PENDING)
+                    .updatedAt(LocalDateTime.now())
+                    .build();
+
             Map<String, Object> directData = new HashMap<>();
-            directData.put("finalResponse", directReply);
-            emit(AgentEventType.FINAL_RESPONSE, "已回复用户", directData);
+            directData.put("replyType", "GREETING");
+            directData.put("contentLength", directReply.length());
+            emit(AgentEventType.NODE_EXECUTION, "构造虚拟 reply_text TODO 走 ToolNode 执行", directData);
 
             Map<String, Object> result = new HashMap<>();
-            result.put(DeepAgentState.TODOS, List.of());
-            result.put(DeepAgentState.FINAL_RESPONSE, directReply);
-            result.put(DeepAgentState.MESSAGES, AiMessage.from(directReply));
+            result.put(DeepAgentState.TODOS, List.of(replyTodo));
+            // 不写 FINAL_RESPONSE，让 RouteAfterPlan 检测到 pending TODO → execute → ToolNode
+            result.put(DeepAgentState.MESSAGES, AiMessage.from(
+                    "已构造 reply_text TODO，待 ToolNode 执行回复"));
+            result.put(DeepAgentState.PLAN_CYCLE_COUNT, planCycleCount);
             return result;
         }
 
@@ -246,13 +367,19 @@ public class PlanNode implements NodeAction<DeepAgentState> {
                                     .assignedAgent(t.getAssignedAgent()).updatedAt(LocalDateTime.now()).build()
                                     : t)
                             .toList();
-                    return Map.of(
-                            DeepAgentState.TODOS, failedTodos,
-                            DeepAgentState.MESSAGES, AiMessage.from("规划连续失败，任务已强制终止")
-                    );
+                    Map<String, Object> parseFailResult = new HashMap<>();
+                    parseFailResult.put(DeepAgentState.TODOS, failedTodos);
+                    parseFailResult.put(DeepAgentState.MESSAGES, AiMessage.from("规划连续失败，任务已强制终止"));
+                    parseFailResult.put(DeepAgentState.PLAN_CYCLE_COUNT, planCycleCount);
+                    return parseFailResult;
                 }
             }
         }
+
+        // ===== TodoValidator 后端校验（含 LLM 重新规划重试）=====
+        // 解析成功后、写入 state 前，对每个 TODO 执行工具引用 + 越界动词校验。
+        // 校验失败时把错误反馈作为 user message 注入，最多重新调用 LLM 规划 MAX_TODO_VALIDATION_RETRIES 次。
+        todos = validateWithRetry(todos, state, instructions, existingSummary);
 
         // 流式推送 PLAN_CREATED（带 todos）
         emit(AgentEventType.PLAN_CREATED, "规划完成，共 " + todos.size() + " 个任务项", Map.of("todos", todos));
@@ -280,6 +407,7 @@ public class PlanNode implements NodeAction<DeepAgentState> {
                     decision.getSeverity(), decision.getReason());
         }
 
+        result.put(DeepAgentState.PLAN_CYCLE_COUNT, planCycleCount);
         return result;
     }
 
@@ -304,6 +432,102 @@ public class PlanNode implements NodeAction<DeepAgentState> {
             }
         }
         return null;
+    }
+
+    /**
+     * 对 LLM 解析出的 TODO 列表做后端校验，失败时带反馈重新调用 LLM 规划（最多重试 {@value #MAX_TODO_VALIDATION_RETRIES} 次）。
+     * <p>
+     * 重试流程：
+     * <ol>
+     *   <li>调用 {@link com.hypersense.boot.framework.agents.engine.validator.TodoValidator#validate}
+     *       检查工具引用 + 越界动词</li>
+     *   <li>校验通过 → 返回原 todos</li>
+     *   <li>校验失败 → 把 errors 拼成 feedback，把"原始 instructions + feedback"重新喂给 LLM，
+     *       重新解析 TODO，再次校验</li>
+     *   <li>超过重试上限仍失败 → 抛 {@link com.hypersense.boot.common.exception.BusinessException}</li>
+     * </ol>
+     * </p>
+     *
+     * @param initialTodos    首次解析得到的 TODO 列表
+     * @param state           当前 agent state（用于读取 enabledTools）
+     * @param instructions    原始用户指令（含历史拼接），用于重试时拼回 prompt
+     * @param existingSummary 现有计划摘要（用于重试时拼回 prompt）
+     * @return 校验通过的 TODO 列表（首次通过则原样返回 initialTodos）
+     */
+    private List<TodoItem> validateWithRetry(List<TodoItem> initialTodos, DeepAgentState state,
+                                             String instructions, String existingSummary) {
+        // 当前 Agent 启用的工具集合（null 安全：传 null 时仅按内置白名单校验）
+        java.util.Set<String> enabledTools = null;
+        List<String> enabledList = state.enabledTools();
+        if (enabledList != null && !enabledList.isEmpty()) {
+            enabledTools = new java.util.HashSet<>(enabledList);
+        }
+
+        // 首次校验
+        com.hypersense.boot.framework.agents.engine.validator.ValidationResult vr =
+                com.hypersense.boot.framework.agents.engine.validator.TodoValidator.validate(
+                        initialTodos, enabledTools);
+        if (vr.isValid()) {
+            return initialTodos;
+        }
+
+        // 校验失败：进入重试循环
+        List<TodoItem> currentTodos = initialTodos;
+        String lastFeedback = vr.joinedErrors();
+        for (int attempt = 1; attempt <= MAX_TODO_VALIDATION_RETRIES; attempt++) {
+            log.warn("PlanNode: TODO 校验失败，第 {}/{} 次重新规划。错误: {}",
+                    attempt, MAX_TODO_VALIDATION_RETRIES, lastFeedback);
+
+            // 构造带 feedback 的重试 prompt
+            String retryPrompt = String.format("""
+                    用户指令（含历史上下文区块，已是 ground truth，请直接基于其内容规划）：%s
+
+                    当前计划状态：
+                    %s
+
+                    请制定或更新执行计划。
+
+                    【上次规划校验失败，必须修正以下问题】
+                    %s
+
+                    修正规则：
+                    - 每个 TODO 必须明确引用一个工具（file_write / file_read / internet_search / sandbox / reply_text / delegate）
+                    - 禁止使用"直接保存/直接生成/直接执行"等表述，改为"使用 xxx 工具"
+                    - 工具名必须在系统内置工具集中
+                    """, instructions, existingSummary, lastFeedback);
+
+            // 重新调用 LLM（不带附件视觉，重试简化为纯文本以降低成本）
+            try {
+                List<ChatMessage> retryMessages = List.of(
+                        SystemMessage.from(PLAN_SYSTEM_PROMPT),
+                        UserMessage.from(retryPrompt)
+                );
+                ChatResponse retryResp = chatModel.chat(retryMessages);
+                String retryPlanText = retryResp.aiMessage().text();
+                log.debug("PlanNode: 第 {} 次重新规划结果\n{}", attempt, retryPlanText);
+
+                // 重新解析
+                currentTodos = parseTodos(retryPlanText, initialTodos);
+                // 再次校验
+                vr = com.hypersense.boot.framework.agents.engine.validator.TodoValidator.validate(
+                        currentTodos, enabledTools);
+                if (vr.isValid()) {
+                    log.info("PlanNode: 第 {} 次重新规划校验通过", attempt);
+                    return currentTodos;
+                }
+                lastFeedback = vr.joinedErrors();
+            } catch (Exception e) {
+                // LLM 调用异常时不中断流程，继续下一次重试
+                log.warn("PlanNode: 第 {} 次重新规划 LLM 调用异常: {}", attempt, e.getMessage());
+                lastFeedback = "重新规划调用异常: " + e.getMessage();
+            }
+        }
+
+        // 重试用尽仍失败：抛业务异常，交由上层处理
+        log.error("PlanNode: TODO 校验失败，重试 {} 次仍未通过。最终错误: {}",
+                MAX_TODO_VALIDATION_RETRIES, lastFeedback);
+        throw new com.hypersense.boot.common.exception.BusinessException(
+                "TODO 校验失败（重试 " + MAX_TODO_VALIDATION_RETRIES + " 次仍未通过）: " + lastFeedback);
     }
 
     /**

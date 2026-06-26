@@ -40,6 +40,11 @@ public class LlmModelConfig extends BaseEntity {
     @Schema(description = "是否启用流式输出(0-否 1-是)")
     private Integer isStreaming;
 
+    /** 是否支持多模态图片输入：1-支持 0-不支持 */
+    @TableField("supports_vision")
+    @Schema(description = "是否支持多模态图片输入(0-否 1-是)")
+    private Integer supportsVision;
+
     @Schema(description = "状态(1-启用 0-禁用)")
     private Integer status;
 

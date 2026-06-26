@@ -1,5 +1,6 @@
 package com.hypersense.boot.framework.agents.skill;
 
+import com.hypersense.boot.agents.service.AgentSessionService;
 import com.hypersense.boot.agents.service.impl.AgentServiceImpl;
 import com.hypersense.boot.common.constant.RedisConstants;
 import com.hypersense.boot.framework.agents.config.AgentProperties;
@@ -246,7 +247,7 @@ class SkillIntegrationTest {
 
             TaskExecutor taskExecutor = Runnable::run;
             agentService = new AgentServiceImpl(deepAgentGraph, agentProperties,
-                    redisTemplate, taskExecutor, sandboxManager, middleware);
+                    redisTemplate, taskExecutor, sandboxManager, middleware, null, null, null, null, null, mock(AgentSessionService.class));
 
             securityUtilsMock = mockStatic(SecurityUtils.class);
             securityUtilsMock.when(SecurityUtils::getUserId).thenReturn(MOCK_USER_ID);
@@ -278,7 +279,7 @@ class SkillIntegrationTest {
             AgentProperties propsNoSkills = new AgentProperties();
             TaskExecutor taskExecutor = Runnable::run;
             AgentServiceImpl serviceNoSkills = new AgentServiceImpl(
-                    deepAgentGraph, propsNoSkills, redisTemplate, taskExecutor, sandboxManager, null);
+                    deepAgentGraph, propsNoSkills, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(AgentSessionService.class));
 
             securityUtilsMock = mockStatic(SecurityUtils.class);
             securityUtilsMock.when(SecurityUtils::getUserId).thenReturn(MOCK_USER_ID);

@@ -1337,6 +1337,7 @@ CREATE TABLE sys_llm_model_config (
     temperature DECIMAL(3,2) DEFAULT 0.70,
     top_p DECIMAL(3,2) DEFAULT 1.00,
     is_streaming SMALLINT DEFAULT 1,
+    supports_vision SMALLINT DEFAULT 0,
     status SMALLINT DEFAULT 1,
     sort INTEGER DEFAULT 0,
     remark VARCHAR(500),
@@ -1365,6 +1366,7 @@ COMMENT ON COLUMN sys_llm_model_config.model_capabilities IS '模型能力标签
 COMMENT ON COLUMN sys_llm_model_config.temperature IS '默认温度参数(0.00-2.00)';
 COMMENT ON COLUMN sys_llm_model_config.top_p IS '默认Top-P参数(0.00-1.00)';
 COMMENT ON COLUMN sys_llm_model_config.is_streaming IS '是否启用流式输出(0-否 1-是)';
+COMMENT ON COLUMN sys_llm_model_config.supports_vision IS '是否支持多模态图片输入(0-否 1-是)';
 COMMENT ON COLUMN sys_llm_model_config.status IS '状态(1-启用 0-禁用)';
 COMMENT ON COLUMN sys_llm_model_config.sort IS '排序';
 COMMENT ON COLUMN sys_llm_model_config.remark IS '备注';
@@ -1383,6 +1385,23 @@ VALUES
 (1, 1, 1, 'glm-4', 'GLM-4旗舰模型', 128000, 4096, '["chat","function_call","code"]', 0.70, 1.00, 1, 1, 1, '智谱GLM-4主力模型', NULL, now(), NULL, now(), 0),
 (2, 1, 1, 'glm-4-flash', 'GLM-4-Flash高速模型', 128000, 4096, '["chat","function_call"]', 0.70, 1.00, 1, 1, 2, '智谱GLM-4快速推理模型', NULL, now(), NULL, now(), 0),
 (3, 1, 2, 'deepseek-chat', 'DeepSeek-V3', 64000, 8192, '["chat","function_call","code","reasoning"]', 0.70, 1.00, 1, 1, 1, 'DeepSeek通用对话模型', NULL, now(), NULL, now(), 0);
+
+
+-- 多模态图片支持字段(已部署环境兼容)
+ALTER TABLE sys_llm_model_config ADD COLUMN IF NOT EXISTS supports_vision SMALLINT DEFAULT 0;
+COMMENT ON COLUMN sys_llm_model_config.supports_vision IS '是否支持多模态图片输入(0-否 1-是)';
+
+-- 种子数据:给主流视觉模型打标
+UPDATE sys_llm_model_config SET supports_vision = 1
+WHERE LOWER(model_name) IN (
+    'gpt-4o', 'gpt-4o-mini', 'gpt-4-vision-preview', 'gpt-4-turbo',
+    'claude-3-5-sonnet', 'claude-3-5-sonnet-latest', 'claude-3-opus', 'claude-3-opus-latest', 'claude-3.7-sonnet',
+    'gemini-1.5-pro', 'gemini-1.5-flash', 'gemini-2.0-flash', 'gemini-2.0-flash-exp',
+    'qwen-vl-max', 'qwen-vl-plus', 'qwen2-vl-72b-instruct',
+    'glm-4v', 'glm-4v-plus', 'glm-4.5v',
+    'step-1v', 'step-1vx',
+    'yi-vision'
+);
 
 
 -- ----------------------------

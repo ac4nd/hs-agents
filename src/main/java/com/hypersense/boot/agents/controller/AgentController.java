@@ -1,8 +1,10 @@
 package com.hypersense.boot.agents.controller;
 
+import com.hypersense.boot.common.annotation.RepeatSubmit;
 import com.hypersense.boot.common.result.Result;
 import com.hypersense.boot.framework.agents.form.AgentSessionForm;
 import com.hypersense.boot.framework.agents.form.ApprovalRequest;
+import com.hypersense.boot.framework.agents.form.SessionMetaForm;
 import com.hypersense.boot.framework.agents.model.InterruptContext;
 import com.hypersense.boot.framework.agents.model.TodoItem;
 import com.hypersense.boot.agents.service.AgentService;
@@ -60,13 +62,16 @@ public class AgentController {
     public SseEmitter streamExecute(@PathVariable String sessionId,
                                     @RequestParam String input,
                                     @RequestParam(required = false) Long modelConfigId,
-                                    @RequestParam(required = false) List<String> attachmentPaths) {
-        return agentService.streamExecute(sessionId, input, modelConfigId, attachmentPaths);
+                                    @RequestParam(required = false) List<String> attachmentPaths,
+                                    @RequestParam(required = false) Long designSystemId,
+                                    @RequestParam(required = false) String designSystemType) {
+        return agentService.streamExecute(sessionId, input, modelConfigId, attachmentPaths, designSystemId, designSystemType);
     }
 
     @Operation(summary = "上传会话附件",
             description = "把文件写入 sessionId 对应的沙箱工作目录 uploads/ 子目录，单文件上限 10MB，单次最多 5 个。返回的 path 列表可在 streamExecute 时通过 attachmentPaths 参数透传，引导 Agent 通过 read_file 工具读取。")
     @PostMapping(value = "/sessions/{sessionId}/attachments", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @RepeatSubmit(expire = 5, message = "文件提交频繁，请5秒后再试")
     public Result<List<AttachmentVO>> uploadAttachments(@PathVariable String sessionId,
                                                         @RequestParam("files") MultipartFile[] files) {
         List<MultipartFile> fileList = files == null ? Collections.emptyList() : Arrays.asList(files);
@@ -149,7 +154,8 @@ public class AgentController {
         return Result.success(agentService.getInterruptContext(sessionId));
     }
 
-    @Operation(summary = "当前用户会话列表", description = "查询当前登录用户的所有 Agent 会话（从 PostgreSQL 查询）")
+    @Operation(summary = "当前用户会话列表",
+            description = "查询当前登录用户的 Agent 会话列表。")
     @GetMapping("/sessions")
     public Result<java.util.List<AgentSessionVO>> listSessions() {
         return Result.success(agentService.listSessions());
@@ -160,5 +166,12 @@ public class AgentController {
     public Result<Void> deleteSession(@PathVariable String sessionId) {
         agentService.deleteSession(sessionId);
         return Result.success();
+    }
+
+    @Operation(summary = "更新会话元数据", description = "部分更新会话的 title 和 pinned 状态（任一字段为 null 表示不更新），回写 Redis 实现跨设备同步")
+    @PatchMapping("/sessions/{sessionId}/meta")
+    public Result<AgentSessionVO> updateSessionMeta(@PathVariable String sessionId,
+                                                     @RequestBody SessionMetaForm form) {
+        return Result.success(agentService.updateSessionMeta(sessionId, form.getTitle(), form.getPinned()));
     }
 }

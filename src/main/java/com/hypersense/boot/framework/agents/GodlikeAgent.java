@@ -275,6 +275,11 @@ public class GodlikeAgent {
 
         // ChatModel 配置（二选一）
         private ChatModel chatModel;
+        /**
+         * 流式 ChatModel 注入点（可选）。
+         * <p>注入后传给 ToolNode，使 file_write 长内容生成走流式，规避同步整体超时。</p>
+         */
+        private dev.langchain4j.model.chat.StreamingChatModel streamingChatModel;
         private String apiKey;
         private String endpoint;
         private String modelName;
@@ -582,6 +587,8 @@ public class GodlikeAgent {
 
             // 1. 创建 ChatModel
             ChatModel model = resolveChatModel();
+            // 1.5 解析流式 ChatModel（用于 ToolNode 长输出场景，规避整体 timeout）
+            streamingChatModel = resolveStreamingChatModel();
 
             // 2. 初始化消息压缩中间件（需要 ChatModel）
             initializeCompressionMiddleware(model);
@@ -601,7 +608,8 @@ public class GodlikeAgent {
             // 5. 构建执行图（注入中间件管道）
             try {
                 CompiledGraph<DeepAgentState> graph = buildGraph(model, middlewarePipeline, sandboxManager);
-                log.info("GodlikeAgent.Builder: Agent 构建完成, 中间件数量={}", middlewarePipeline.getMiddlewares().size());
+                log.info("GodlikeAgent.Builder: Agent 构建完成, 中间件数量={}, streamingEnabled={}",
+                        middlewarePipeline.getMiddlewares().size(), streamingChatModel != null);
                 return new GodlikeAgent(graph, sandboxManager, skillsMiddleware);
             } catch (Exception e) {
                 throw new RuntimeException("Agent 图构建失败: " + e.getMessage(), e);
@@ -627,6 +635,22 @@ public class GodlikeAgent {
                     .maxTokens(maxTokens != null ? maxTokens : 4096)
                     .timeout(Duration.ofSeconds(120))
                     .build();
+        }
+
+        /**
+         * 解析流式 ChatModel：仅当调用方通过 {@link #streamingModel(StreamingChatModel)} 显式注入时启用。
+         * 默认返回 null，ToolNode 自动回退同步路径。
+         */
+        private dev.langchain4j.model.chat.StreamingChatModel resolveStreamingChatModel() {
+            return streamingChatModel;
+        }
+
+        /**
+         * 注入流式 ChatModel，使 ToolNode 长输出场景走流式（推荐生产环境启用）。
+         */
+        public Builder streamingModel(dev.langchain4j.model.chat.StreamingChatModel streamingChatModel) {
+            this.streamingChatModel = streamingChatModel;
+            return this;
         }
 
         private SandboxManager resolveSandboxManager() {
@@ -697,11 +721,15 @@ public class GodlikeAgent {
             // 创建节点（非 Spring 路径：使用禁用智能门控的 HitlGateChecker，避免误触发 LLM 中断）
             AgentProperties defaultProps = new AgentProperties();
             HitlGateChecker disabledGate = HitlGateChecker.disabled(model);
-            PlanNode planNode = new PlanNode(model, disabledGate, defaultProps);
-            ExecuteNode executeNode = new ExecuteNode(model, disabledGate);
+            // 非 Spring 路径下构造 AttachmentContext：节点可按需把附件图片以 ImageContent 附加到 LLM 调用
+            com.hypersense.boot.framework.agents.serializer.AttachmentContext attachmentCtx =
+                    new com.hypersense.boot.framework.agents.serializer.AttachmentContext(
+                            sandboxManager, null, null);
+            PlanNode planNode = new PlanNode(model, disabledGate, defaultProps, attachmentCtx);
+            ExecuteNode executeNode = new ExecuteNode(model, disabledGate, attachmentCtx);
             DelegateNode delegateNode = new DelegateNode(model, tools, subAgentDefinitions, sandboxManager);
-            ToolNode toolNode = ToolNode.create(tools, toolRetryConfig, model);
-            FinalizeNode finalizeNode = new FinalizeNode(model);
+            ToolNode toolNode = ToolNode.create(tools, toolRetryConfig, model, streamingChatModel);
+            FinalizeNode finalizeNode = new FinalizeNode(model, attachmentCtx);
 
             // 创建路由
             RouteAfterPlan routeAfterPlan = new RouteAfterPlan();

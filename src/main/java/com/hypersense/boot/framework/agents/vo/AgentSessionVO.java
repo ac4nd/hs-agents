@@ -36,6 +36,19 @@ public class AgentSessionVO {
     @Schema(description = "所属用户 ID")
     private Long userId;
 
+    /**
+     * 会话标题（用于前端 TagsView 标签展示）。
+     * <p>
+     * 创建时由 instructions 前 30 字符生成；前端 TagsView / 最近会话列表以此字段为主显示。
+     * </p>
+     */
+    @Schema(description = "会话标题（TagsView 标签展示用）")
+    private String title;
+
+    /** 是否固定到 TagsView 顶部（默认 false；当前由前端管理，后端仅持久化） */
+    @Schema(description = "是否固定到标签栏顶部")
+    private Boolean pinned;
+
     /** 会话状态 */
     @Schema(description = "会话状态")
     private SessionStatus status;

@@ -38,6 +38,17 @@ public class ChatModelRegistry {
                     log.debug("ChatModelRegistry eviction: modelConfigId={}, cause={}", key, cause))
             .build();
 
+    /**
+     * 流式 ChatModel 缓存：用于长输出场景（ToolNode 生成完整 HTML 等），
+     * 避免同步请求超时。与同步 cache 独立，互不影响。
+     */
+    private final Cache<Long, dev.langchain4j.model.chat.StreamingChatModel> streamingCache = Caffeine.newBuilder()
+            .maximumSize(64)
+            .expireAfterAccess(2, TimeUnit.HOURS)
+            .removalListener((key, value, cause) ->
+                    log.debug("ChatModelRegistry streaming eviction: modelConfigId={}, cause={}", key, cause))
+            .build();
+
     public ChatModelRegistry(ChatModelFactory factory,
                              @Qualifier("chatModel") @Nullable ChatModel fallbackChatModel) {
         this.factory = factory;
@@ -78,6 +89,7 @@ public class ChatModelRegistry {
     public void invalidate(Long modelConfigId) {
         if (modelConfigId != null) {
             cache.invalidate(modelConfigId);
+            streamingCache.invalidate(modelConfigId);
         }
     }
 
@@ -86,5 +98,17 @@ public class ChatModelRegistry {
      */
     public void invalidateAll() {
         cache.invalidateAll();
+        streamingCache.invalidateAll();
+    }
+
+    /**
+     * 获取或构建指定模型的流式 ChatModel（不兜底，失败抛异常）。
+     * <p>用于长输出场景（ToolNode 生成完整 HTML 等），通过 SSE chunk 接收避免整体超时。</p>
+     */
+    public dev.langchain4j.model.chat.StreamingChatModel getStreaming(Long modelConfigId) {
+        if (modelConfigId == null) {
+            throw new IllegalArgumentException("modelConfigId 不能为空");
+        }
+        return streamingCache.get(modelConfigId, factory::buildStreaming);
     }
 }

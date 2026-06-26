@@ -50,11 +50,11 @@ public class MemoryService {
             AgentMemory.Category.DECISION, AgentMemory.Category.PROCEDURE);
 
     private final MemoryRepository repository;
-    private final ZhipuEmbeddingClient embeddingClient;
+    private final AliyunEmbeddingClient embeddingClient;
     private final ChatModel chatModel;
     private final AgentProperties.MemoryConfig config;
 
-    public MemoryService(MemoryRepository repository, ZhipuEmbeddingClient embeddingClient,
+    public MemoryService(MemoryRepository repository, AliyunEmbeddingClient embeddingClient,
                          ChatModel chatModel, AgentProperties.MemoryConfig config) {
         this.repository = repository;
         this.embeddingClient = embeddingClient;

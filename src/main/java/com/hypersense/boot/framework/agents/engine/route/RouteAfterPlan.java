@@ -26,6 +26,9 @@ import java.util.List;
 @Component
 public class RouteAfterPlan implements EdgeAction<DeepAgentState> {
 
+    /** plan 周期上限：允许 1 次规划 + 1 次复用，第 3 次到达路由即强制终止（与 PlanNode 同步） */
+    private static final int MAX_PLAN_CYCLES = 2;
+
     @Override
     public String apply(DeepAgentState state) {
         // 智能 HITL Gate：PlanNode 置 NEED_CONFIRMATION=true 时立即结束图执行
@@ -41,9 +44,24 @@ public class RouteAfterPlan implements EdgeAction<DeepAgentState> {
             return StateGraph.END;
         }
 
+        // === 双保险 2：plan 周期计数器，超过上限强制 finalize（与 PlanNode.MAX_PLAN_CYCLES 联动）===
+        // plan_cycle_count 未在 SCHEMA 注册：若 PlanNode 写入失败被丢弃，此处读到 0，
+        // 则下面的 todos 状态兜底逻辑仍生效（hasPending=false → finalize），双保险至少一道生效。
+        int planCycleCount;
+        try {
+            planCycleCount = state.<Integer>value(DeepAgentState.PLAN_CYCLE_COUNT).orElse(0);
+        } catch (ClassCastException cce) {
+            log.warn("RouteAfterPlan: plan_cycle_count 类型异常，回退为 0: {}", cce.getMessage());
+            planCycleCount = 0;
+        }
+        if (planCycleCount >= MAX_PLAN_CYCLES) {
+            log.warn("RouteAfterPlan: plan 周期数 {} 达到上限，强制 finalize（防漂移）", planCycleCount);
+            return "finalize";
+        }
+
         List<TodoItem> todos = state.todos();
 
-        if (todos.isEmpty()) {
+        if (todos == null || todos.isEmpty()) {
             log.info("RouteAfterPlan: 计划为空，结束执行");
             return "finalize";
         }

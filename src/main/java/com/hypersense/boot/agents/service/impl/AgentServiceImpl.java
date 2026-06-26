@@ -19,6 +19,7 @@ import com.hypersense.boot.framework.agents.sandbox.SandboxManager;
 import com.hypersense.boot.framework.agents.sandbox.Sandbox;
 import com.hypersense.boot.framework.agents.sandbox.SandboxResult;
 import com.hypersense.boot.agents.service.AgentService;
+import com.hypersense.boot.agents.service.AgentSessionService;
 import com.hypersense.boot.framework.agents.skill.SkillsMiddleware;
 import com.hypersense.boot.framework.agents.vo.AgentSessionVO;
 import com.hypersense.boot.framework.agents.vo.AttachmentVO;
@@ -26,6 +27,10 @@ import com.hypersense.boot.framework.agents.config.AgentProperties;
 import com.hypersense.boot.framework.security.util.SecurityUtils;
 import com.hypersense.boot.framework.tenant.TenantContextHolder;
 import dev.langchain4j.data.message.UserMessage;
+// 多模态图片下发所需的消息内容类型（与 ToolNode/FileReadTool 同源）
+import dev.langchain4j.data.message.ImageContent;
+import dev.langchain4j.data.message.TextContent;
+import dev.langchain4j.data.message.Content;
 import lombok.extern.slf4j.Slf4j;
 import org.bsc.langgraph4j.CompiledGraph;
 import org.bsc.langgraph4j.GraphInput;
@@ -41,6 +46,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.Base64;
 import java.io.IOException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -77,6 +83,11 @@ public class AgentServiceImpl implements AgentService {
     /** sys_llm_api_key_config / sys_llm_vendor_config 服务：listAvailableModels 联表查询 */
     private final com.hypersense.boot.system.service.LlmApiKeyConfigService llmApiKeyConfigService;
     private final com.hypersense.boot.system.service.LlmVendorConfigService llmVendorConfigService;
+    /** 设计系统配置服务：注入 brandSpec/codeSpec 到 LLM System 指令 */
+    private final com.hypersense.boot.system.service.DesignSystemConfigService designSystemConfigService;
+
+    /** 会话-项目绑定 DB 服务（落库 sessionId ↔ projectId/title 关联） */
+    private final AgentSessionService agentSessionService;
 
     /** 编译图缓存：sessionId → CompiledGraph（Caffeine 自动过期，避免内存泄漏） */
     private final Cache<String, CompiledGraph<DeepAgentState>> graphCache;
@@ -94,7 +105,9 @@ public class AgentServiceImpl implements AgentService {
                             com.hypersense.boot.framework.agents.llm.ChatModelRegistry chatModelRegistry,
                             com.hypersense.boot.system.service.LlmModelConfigService llmModelConfigService,
                             com.hypersense.boot.system.service.LlmApiKeyConfigService llmApiKeyConfigService,
-                            com.hypersense.boot.system.service.LlmVendorConfigService llmVendorConfigService) {
+                            com.hypersense.boot.system.service.LlmVendorConfigService llmVendorConfigService,
+                            com.hypersense.boot.system.service.DesignSystemConfigService designSystemConfigService,
+                            AgentSessionService agentSessionService) {
         this.deepAgentGraph = deepAgentGraph;
         this.agentProperties = agentProperties;
         this.redisTemplate = redisTemplate;
@@ -106,6 +119,8 @@ public class AgentServiceImpl implements AgentService {
         this.llmModelConfigService = llmModelConfigService;
         this.llmApiKeyConfigService = llmApiKeyConfigService;
         this.llmVendorConfigService = llmVendorConfigService;
+        this.designSystemConfigService = designSystemConfigService;
+        this.agentSessionService = agentSessionService;
         this.graphCache = Caffeine.newBuilder()
                 .expireAfterAccess(agentProperties.getDeep().getSessionTtl(), TimeUnit.SECONDS)
                 .maximumSize(100)
@@ -133,9 +148,14 @@ public class AgentServiceImpl implements AgentService {
         // 解析 session 绑定的 modelConfigId：form → 租户默认模型 → null(兜底)
         Long modelConfigId = resolveDefaultModelConfigId(form.getModelConfigId());
 
+        // 标题默认取 instructions 前 30 字符（前端 TagsView 显示用，后续可被前端覆盖）
+        String sessionTitle = resolveSessionTitle(form.getInstructions());
+
         AgentSessionVO session = AgentSessionVO.builder()
                 .sessionId(sessionId)
                 .userId(currentUserId)
+                .title(sessionTitle)
+                .pinned(false)
                 .status(SessionStatus.CREATED)
                 .todos(List.of())
                 .files(Map.of())
@@ -149,13 +169,44 @@ public class AgentServiceImpl implements AgentService {
 
         saveSession(session);
 
+        // DB 层落库会话元信息索引（失败不阻塞会话创建，仅记录日志）
+        try {
+            agentSessionService.saveBinding(
+                    sessionId,
+                    currentUserId,
+                    TenantContextHolder.getTenantId(),
+                    sessionTitle,
+                    SessionStatus.CREATED.name()
+            );
+        } catch (Exception e) {
+            log.warn("createSession 落 DB 索引失败（不阻塞主流程）: sessionId={}, err={}",
+                    sessionId, e.getMessage());
+        }
+
+        // 维护「用户 → sessionId」Hash 索引，替代 listSessions 中的 keys 全键扫描
+        try {
+            redisTemplate.opsForHash().put(sessionIndexKey(currentUserId), sessionId, "");
+        } catch (Exception e) {
+            // 索引写入失败不阻塞会话创建，懒迁移会兜底
+            log.warn("createSession 写入索引失败: userId={}, sessionId={}, err={}", currentUserId, sessionId, e.getMessage());
+        }
+
         // 预构建编译图（按 session.modelConfigId 解析 ChatModel，未配置时回退兜底单例）
         try {
             DeepAgentGraph.HitlBuildConfig hitlConfig = hitlEnabled
                     ? new DeepAgentGraph.HitlBuildConfig(true, hitlInterruptNodes)
                     : DeepAgentGraph.HitlBuildConfig.disabled();
             dev.langchain4j.model.chat.ChatModel sessionModel = chatModelRegistry.getOrDefault(modelConfigId);
-            CompiledGraph<DeepAgentState> graph = deepAgentGraph.build(sessionModel, hitlConfig);
+            // 解析流式 ChatModel：modelConfigId 非空时构建并缓存，长内容生成走 SSE 流式避免整体超时
+            dev.langchain4j.model.chat.StreamingChatModel streamingModel = null;
+            if (modelConfigId != null) {
+                try {
+                    streamingModel = chatModelRegistry.getStreaming(modelConfigId);
+                } catch (Exception e) {
+                    log.warn("创建会话：流式 ChatModel 构建失败，回退同步: {}", e.getMessage());
+                }
+            }
+            CompiledGraph<DeepAgentState> graph = deepAgentGraph.build(sessionModel, streamingModel, hitlConfig);
             graphCache.put(sessionId, graph);
         } catch (Exception e) {
             throw new BusinessException("Agent 图构建失败: " + e.getMessage());
@@ -219,15 +270,26 @@ public class AgentServiceImpl implements AgentService {
 
     @Override
     public SseEmitter streamExecute(String sessionId, String userInput) {
-        return streamExecute(sessionId, userInput, null, null);
+        return streamExecute(sessionId, userInput, null, null, null, null);
     }
 
     @Override
-    public SseEmitter streamExecute(String sessionId, String userInput, Long modelConfigId, List<String> attachmentPaths) {
+    public SseEmitter streamExecute(String sessionId, String userInput, Long modelConfigId,
+                                    List<String> attachmentPaths, Long designSystemId, String designSystemType) {
+        // 防御性日志：追踪用户上传的附件与设计系统类型（便于排查多模态下发与设计系统注入链路）
+        log.info("[streamExecute] sessionId={} modelConfigId={} attachmentPaths={} designSystemId={} designSystemType={}",
+                sessionId, modelConfigId,
+                attachmentPaths == null ? 0 : attachmentPaths.size(),
+                designSystemId, designSystemType);
+
         AgentSessionVO session = getAndValidateSession(sessionId);
 
-        // 附件路径非空 → 注入上下文提示到 input 头部
-        String effectiveInput = injectAttachmentContext(userInput, attachmentPaths);
+        // 附件上下文注入（文本提示路径）由 buildInitialState 内部统一处理：
+        //   - 当存在图片附件且模型支持视觉时，走多模态路径（ImageContent）；
+        //   - 否则 buildInitialState 会调用 injectAttachmentContext 注入文本提示。
+        // 此处保留 effectiveInput 仅作为 history 追加时使用的纯文本（不带附件提示），
+        // 避免在对话历史里重复记录附件上下文。
+        String effectiveInput = userInput;
 
         // 切换检测：传入 modelConfigId 且与当前不一致 → invalidate 旧图 + 更新 session
         if (modelConfigId != null && !modelConfigId.equals(session.getModelConfigId())) {
@@ -284,12 +346,20 @@ public class AgentServiceImpl implements AgentService {
             // 提到 lambda 外的可变持有：通过事件总线捕获 FINAL_RESPONSE 文本，
             // 比依赖 lastEndState.finalResponse()（END 节点 state 可能丢通道）更可靠
             final String[] capturedFinalResponse = {null};
+            // SSE emitter 完成标志：emitter.complete()/timeout 后所有 send 都会失败，避免无意义日志噪音
+            final java.util.concurrent.atomic.AtomicBoolean emitterCompleted = new java.util.concurrent.atomic.AtomicBoolean(false);
             // 设置子 Agent 事件总线：子 Agent 执行事件通过此消费者冒泡到 SSE
             SubAgentEventBus.set(event -> {
+                if (emitterCompleted.get()) {
+                    // emitter 已完成（图执行结束/超时/客户端断开），丢弃后续事件，避免日志噪音
+                    return;
+                }
                 try {
                     emitter.send(SseEmitter.event().name("agent_event").data(event));
                 } catch (Exception e) {
-                    log.warn("SSE 子 Agent 事件推送失败: {}", e.getMessage());
+                    // 静默处理：emitter 状态变更导致 send 失败属预期，标记完成避免后续重复尝试
+                    emitterCompleted.set(true);
+                    log.debug("SSE 子 Agent 事件推送失败（已标记完成）: {}", e.getMessage());
                 }
                 // 同步捕获 FINAL_RESPONSE 事件（PlanNode DIRECT_REPLY / FinalizeNode 都会推送）
                 if (event.getType() == AgentEventType.FINAL_RESPONSE
@@ -312,7 +382,7 @@ public class AgentServiceImpl implements AgentService {
             boolean historyAppended = false; // 防止正常路径与 finally 重复追加
 
             try {
-                Map<String, Object> initialState = buildInitialState(sessionId, effectiveInput, session.getEnabledTools(), session.getHistorySummary(), session.getHistory(), currentUserId, currentTenantId);
+                Map<String, Object> initialState = buildInitialState(sessionId, effectiveInput, session.getEnabledTools(), session.getHistorySummary(), session.getHistory(), currentUserId, currentTenantId, attachmentPaths, designSystemId, designSystemType);
                 // INFO 级别诊断：验证多轮上下文是否正确加载（用户报告"找不到历史内容"问题排查）
                 int histSize = session.getHistory() == null ? 0 : session.getHistory().size();
                 boolean hasSummary = session.getHistorySummary() != null && !session.getHistorySummary().isBlank();
@@ -379,6 +449,7 @@ public class AgentServiceImpl implements AgentService {
                 } catch (Exception sendEx) {
                     log.debug("SSE 完成事件推送跳过（emitter 已完成或客户端断开）: err={}", sendEx.getMessage());
                 }
+                emitterCompleted.set(true);
                 emitter.complete();
 
                 // 更新会话状态到 Redis（history 追加统一在 finally 块处理，避免路径分裂导致漏追加）
@@ -419,6 +490,7 @@ public class AgentServiceImpl implements AgentService {
                 }
                 activeEmitters.remove(sessionId);
                 // 客户端已断开时不再 completeWithError，避免二次刷错；正常 complete 让框架回收
+                emitterCompleted.set(true);
                 if (!isClientAbort(e)) {
                     emitter.completeWithError(e);
                 } else {
@@ -575,6 +647,17 @@ public class AgentServiceImpl implements AgentService {
     }
 
     /**
+     * 构建「用户 → sessionId 集合」索引 Hash Key。
+     * <p>
+     * 用于替代 listSessions 中的 {@code keys("agent:session:*")} 全键扫描：
+     * 该 Hash 的 field 为 sessionId，value 固定为空串（仅作集合标记）。
+     * </p>
+     */
+    private String sessionIndexKey(Long userId) {
+        return "agent:session:index:" + userId;
+    }
+
+    /**
      * 保存会话到 Redis（带 TTL）
      */
     private void saveSession(AgentSessionVO session) {
@@ -678,6 +761,45 @@ public class AgentServiceImpl implements AgentService {
                                                   String historySummary,
                                                   List<AgentSessionVO.ConversationMessage> history,
                                                   Long userId, Long tenantId) {
+        return buildInitialState(sessionId, userInput, enabledTools, historySummary, history, userId, tenantId, null, null);
+    }
+
+    private Map<String, Object> buildInitialState(String sessionId, String userInput, List<String> enabledTools,
+                                                  String historySummary,
+                                                  List<AgentSessionVO.ConversationMessage> history,
+                                                  Long userId, Long tenantId,
+                                                  List<String> attachmentPaths) {
+        return buildInitialState(sessionId, userInput, enabledTools, historySummary, history, userId, tenantId,
+                attachmentPaths, null, null);
+    }
+
+    private Map<String, Object> buildInitialState(String sessionId, String userInput, List<String> enabledTools,
+                                                  String historySummary,
+                                                  List<AgentSessionVO.ConversationMessage> history,
+                                                  Long userId, Long tenantId,
+                                                  List<String> attachmentPaths, Long designSystemId) {
+        return buildInitialState(sessionId, userInput, enabledTools, historySummary, history, userId, tenantId,
+                attachmentPaths, designSystemId, null);
+    }
+
+    /**
+     * 构建图执行的初始状态（包含会话 ID、消息列表和启用的工具）。
+     * <p>
+     * 多模态分支：当 attachmentPaths 中存在图片，且当前会话模型支持视觉时，构造
+     * {@code UserMessage(TextContent + ImageContent...)} 真正把图片字节下发到 LLM；
+     * 否则降级为 {@link #injectAttachmentContext} 的文本提示路径。
+     * </p>
+     * <p>
+     * 多模态构造失败（图片超限/读取异常）会被 try-catch 兜底，自动降级为文本提示，
+     * 避免图片处理问题导致整轮对话不可用。
+     * </p>
+     */
+    private Map<String, Object> buildInitialState(String sessionId, String userInput, List<String> enabledTools,
+                                                  String historySummary,
+                                                  List<AgentSessionVO.ConversationMessage> history,
+                                                  Long userId, Long tenantId,
+                                                  List<String> attachmentPaths,
+                                                  Long designSystemId, String designSystemType) {
         Map<String, Object> initialState = new HashMap<>();
         initialState.put(DeepAgentState.SESSION_ID, sessionId);
         // 把会话内历史拼接到指令前缀，让 LLM 能看到多轮上下文（同一 session 内的连续性）
@@ -690,12 +812,89 @@ public class AgentServiceImpl implements AgentService {
         log.debug("buildInitialState: rendered instructions length={}, preview={}",
                 instructions.length(),
                 instructions.length() > 200 ? instructions.substring(0, 200) + "..." : instructions);
+        // 设计系统规范注入：在历史拼接之后、技能目录之前，把 brandSpec/codeSpec 拼到 System 指令前
+        // 按 designSystemType 显式分流：
+        //   - "template"（对应 UI 的 official 分类）→ getTemplateDetailById，查 sys_design_system_config_template
+        //   - "personal" 或缺省 → getDetailById，查 sys_design_system_config
+        // 两表 ID 独立，必须由前端携带类型参数指明查哪张表，禁止双表回查以避免误命中。
+        if (designSystemId != null) {
+            String brandSpec = null;
+            String codeSpec = null;
+            boolean isTemplate = "template".equalsIgnoreCase(designSystemType);
+            try {
+                if (isTemplate) {
+                    com.hypersense.boot.system.model.vo.DesignSystemConfigTemplateVO tpl =
+                            designSystemConfigService.getTemplateDetailById(designSystemId);
+                    if (tpl != null) {
+                        brandSpec = tpl.getBrandSpec();
+                        codeSpec = tpl.getCodeSpec();
+                    }
+                    log.info("[buildInitialState] 注入设计系统规范（官方模板）: sessionId={} designSystemId={} promptLen={}",
+                            sessionId, designSystemId,
+                            (brandSpec == null ? 0 : brandSpec.length()) + (codeSpec == null ? 0 : codeSpec.length()));
+                } else {
+                    com.hypersense.boot.system.model.vo.DesignSystemConfigPageVO ds =
+                            designSystemConfigService.getDetailById(designSystemId);
+                    if (ds != null) {
+                        brandSpec = ds.getBrandSpec();
+                        codeSpec = ds.getCodeSpec();
+                    }
+                    log.info("[buildInitialState] 注入设计系统规范（个人配置）: sessionId={} designSystemId={} promptLen={}",
+                            sessionId, designSystemId,
+                            (brandSpec == null ? 0 : brandSpec.length()) + (codeSpec == null ? 0 : codeSpec.length()));
+                }
+            } catch (Exception e) {
+                log.warn("[buildInitialState] 加载设计系统失败，跳过注入: sessionId={} designSystemId={} type={} reason={}",
+                        sessionId, designSystemId, isTemplate ? "template" : "personal", e.getMessage());
+            }
+            // 渲染并注入
+            if (brandSpec != null || codeSpec != null) {
+                String dsPrompt = buildDesignSystemPromptFromSpec(brandSpec, codeSpec);
+                if (dsPrompt != null && !dsPrompt.isBlank()) {
+                    instructions = dsPrompt + "\n\n" + instructions;
+                    log.info("[buildInitialState] 设计系统 prompt 渲染完成: sessionId={} source={} finalLen={}",
+                            sessionId, isTemplate ? "template" : "personal", dsPrompt.length());
+                }
+            } else {
+                log.warn("[buildInitialState] 设计系统 id={} type={} 未找到记录，跳过注入",
+                        designSystemId, isTemplate ? "template" : "personal");
+            }
+        }
         // 技能目录注入（在历史拼接之后）
         if (skillsMiddleware != null && skillsMiddleware.hasSkills()) {
             instructions = skillsMiddleware.enhanceInstructions(instructions);
         }
         initialState.put(DeepAgentState.INSTRUCTIONS, instructions);
-        initialState.put(DeepAgentState.MESSAGES, List.of(UserMessage.from(userInput)));
+
+        // 1. 检测图片附件
+        List<String> imagePaths = filterImageAttachments(attachmentPaths);
+
+        // 2. 决定是否能走多模态：有图片 + 模型支持视觉 → 多模态路径；否则原文本路径
+        UserMessage userMessage;
+        if (!imagePaths.isEmpty() && supportsVisionForSession(sessionId)) {
+            try {
+                userMessage = buildMultimodalUserMessage(userInput, imagePaths, sessionId);
+                log.info("[buildInitialState] 多模态下发 sessionId={} imageCount={}",
+                        sessionId, imagePaths.size());
+            } catch (Exception e) {
+                // 多模态构造失败 → 降级文本提示，不抛异常保证对话可用
+                log.warn("[buildInitialState] 多模态构造失败，降级文本提示: sessionId={} reason={}",
+                        sessionId, e.getMessage());
+                String effectiveInput = injectAttachmentContext(userInput, attachmentPaths);
+                userMessage = UserMessage.from(effectiveInput);
+            }
+        } else {
+            // 原文本路径（保留 injectAttachmentContext 作为 fallback 与无图场景的统一入口）
+            String effectiveInput = injectAttachmentContext(userInput, attachmentPaths);
+            userMessage = UserMessage.from(effectiveInput);
+        }
+        initialState.put(DeepAgentState.MESSAGES, List.of(userMessage));
+
+        // 附件路径列表：供 PlanNode/FinalizeNode/ExecuteNode 等不接 tools 的节点
+        // 在调 LLM 前通过 AttachmentContext 把图片以 ImageContent 形式附加，避免被节点纯文本重拼丢弃
+        initialState.put(DeepAgentState.ATTACHMENT_PATHS,
+                attachmentPaths == null ? List.of() : new ArrayList<>(attachmentPaths));
+
         // 用户身份注入（供 MemoryMiddleware 长期记忆隔离使用）
         // userId/tenantId 由调用方在 HTTP 请求线程预先捕获，避免异步线程读取 ThreadLocal 失败
         initialState.put(DeepAgentState.USER_ID, userId);
@@ -704,6 +903,64 @@ public class AgentServiceImpl implements AgentService {
             initialState.put(DeepAgentState.ENABLED_TOOLS, enabledTools);
         }
         return initialState;
+    }
+
+    /**
+     * 把设计系统的 brandSpec/codeSpec 渲染为可读的中文 prompt 片段，
+     * 由 {@link #buildInitialState} 拼接到 LLM System 指令最前缀。
+     * <p>
+     * 解析策略：先用 Jackson ObjectMapper 把 JSON 字符串美化输出；解析失败时退化为原始字符串。
+     * 当 brandSpec 和 codeSpec 均为空时返回 {@code null}（不注入）。
+     * </p>
+     */
+    private String buildDesignSystemPrompt(com.hypersense.boot.system.model.vo.DesignSystemConfigPageVO ds) {
+        if (ds == null) {
+            return null;
+        }
+        return buildDesignSystemPromptFromSpec(ds.getBrandSpec(), ds.getCodeSpec());
+    }
+
+    /**
+     * 基于 brandSpec / codeSpec 原始字符串渲染设计系统注入 prompt。
+     * 兼容个人配置表（{@code DesignSystemConfigPageVO}）和官方模板表（{@code DesignSystemConfigTemplateVO}），
+     * 两者都暴露这两个字段，统一在此渲染。
+     */
+    private String buildDesignSystemPromptFromSpec(String brandSpec, String codeSpec) {
+        boolean hasBrand = brandSpec != null && !brandSpec.isBlank();
+        boolean hasCode = codeSpec != null && !codeSpec.isBlank();
+        if (!hasBrand && !hasCode) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("【当前设计方案 / 当前设计系统】（用户在设计模式选定的方案，所有指代「当前设计方案/当前设计系统/当前风格」的请求都必须直接基于以下规范执行）\n");
+        sb.append("你必须严格遵循以下设计系统规范：\n\n");
+        if (hasBrand) {
+            sb.append("【品牌规范】\n").append(prettyJsonOrRaw(brandSpec)).append("\n\n");
+        }
+        if (hasCode) {
+            sb.append("【代码规范】\n").append(prettyJsonOrRaw(codeSpec)).append("\n\n");
+        }
+        sb.append("生成 HTML/CSS 时必须严格采用以上设计 Token（颜色、字体、圆角、间距等）。\n");
+        sb.append("当用户说「根据当前设计方案/当前设计系统/当前风格帮我设计 xxx」时，直接基于以上规范原创生成完整 HTML，");
+        sb.append("禁止反问用户「当前设计方案指什么」，禁止 CLARIFY，必须立即进入 file_write 落盘。");
+        return sb.toString();
+    }
+
+    /**
+     * 把 JSON 字符串美化输出；解析失败时退化为原始字符串（去掉首尾空白）。
+     */
+    private String prettyJsonOrRaw(String json) {
+        if (json == null || json.isBlank()) {
+            return "";
+        }
+        try {
+            com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+            Object parsed = mapper.readValue(json, Object.class);
+            return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(parsed);
+        } catch (Exception e) {
+            log.debug("[prettyJsonOrRaw] JSON 解析失败，退化为原始字符串: reason={}", e.getMessage());
+            return json.trim();
+        }
     }
 
     /**
@@ -900,7 +1157,16 @@ public class AgentServiceImpl implements AgentService {
                     : DeepAgentGraph.HitlBuildConfig.disabled();
             dev.langchain4j.model.chat.ChatModel sessionModel =
                     chatModelRegistry.getOrDefault(session.getModelConfigId());
-            CompiledGraph<DeepAgentState> rebuilt = deepAgentGraph.build(sessionModel, hitlConfig);
+            // 流式 ChatModel（长内容生成场景使用）
+            dev.langchain4j.model.chat.StreamingChatModel streamingModel = null;
+            if (session.getModelConfigId() != null) {
+                try {
+                    streamingModel = chatModelRegistry.getStreaming(session.getModelConfigId());
+                } catch (Exception e) {
+                    log.warn("图重建：流式 ChatModel 构建失败，回退同步: {}", e.getMessage());
+                }
+            }
+            CompiledGraph<DeepAgentState> rebuilt = deepAgentGraph.build(sessionModel, streamingModel, hitlConfig);
             graphCache.put(sessionId, rebuilt);
             log.info("图实例 cache miss 重建: sessionId={}, modelConfigId={}",
                     sessionId, session.getModelConfigId());
@@ -911,6 +1177,20 @@ public class AgentServiceImpl implements AgentService {
     }
 
     // ========== HITL 辅助方法 ==========
+
+    /**
+     * 根据 instructions 推导会话标题：去空白后取前 30 字符，超长补省略号；为空回退 sessionId 前 8 位。
+     */
+    private String resolveSessionTitle(String instructions) {
+        if (instructions == null) {
+            return null;
+        }
+        String trimmed = instructions.trim();
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        return trimmed.length() > 30 ? trimmed.substring(0, 30) + "…" : trimmed;
+    }
 
     /**
      * 解析 HITL 是否启用
@@ -1349,28 +1629,168 @@ public class AgentServiceImpl implements AgentService {
     @Override
     public List<AgentSessionVO> listSessions() {
         Long currentUserId = getCurrentUserId();
-        String pattern = StrUtil.format(RedisConstants.Agent.SESSION, "*");
 
-        // 注意：Redis keys 命令在生产环境不推荐，这里仅作为示例
-        // 实际生产应使用 Redis Hash 结构存储 userId -> sessionIds 映射
-        Set<String> keys = redisTemplate.keys(pattern);
-        if (keys == null || keys.isEmpty()) {
+        String indexKey = sessionIndexKey(currentUserId);
+
+        // 懒迁移：索引 Key 完全不存在（未创建过）时，用一次 keys 扫描回填旧会话
+        // 后续每次调用索引 Key 都已存在，不再走 keys 路径，避免高并发下的全键扫描副作用
+        try {
+            Boolean exists = redisTemplate.hasKey(indexKey);
+            if (!Boolean.TRUE.equals(exists)) {
+                migrateLegacySessions(currentUserId, indexKey);
+            }
+        } catch (Exception e) {
+            log.warn("listSessions 懒迁移检查失败: userId={}, err={}", currentUserId, e.getMessage());
+        }
+
+        // 从 Hash 索引获取该用户的全部 sessionId
+        Set<Object> sessionIdObjs = redisTemplate.opsForHash().keys(indexKey);
+        if (sessionIdObjs == null || sessionIdObjs.isEmpty()) {
             return List.of();
         }
 
         List<AgentSessionVO> sessions = new java.util.ArrayList<>();
-        for (String key : keys) {
-            Object value = redisTemplate.opsForValue().get(key);
-            if (value instanceof AgentSessionVO session) {
-                if (currentUserId.equals(session.getUserId())) {
-                    sessions.add(session);
+        List<Object> staleIds = new java.util.ArrayList<>();
+        for (Object sidObj : sessionIdObjs) {
+            if (sidObj == null) continue;
+            String sessionId = String.valueOf(sidObj);
+            // 跳过懒迁移占位 field
+            if ("__migrated__".equals(sessionId)) continue;
+            Object value = redisTemplate.opsForValue().get(sessionKey(sessionId));
+            if (value == null) {
+                // 懒清理：会话 TTL 已过期但索引残留，标记删除
+                staleIds.add(sidObj);
+                continue;
+            }
+            // 兼容 RedisConfig.disableDefaultTyping() 导致的反序列化为 LinkedHashMap 情况
+            AgentSessionVO session;
+            if (value instanceof AgentSessionVO) {
+                session = (AgentSessionVO) value;
+            } else if (value instanceof java.util.Map) {
+                try {
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+                    session = mapper.convertValue(value, AgentSessionVO.class);
+                } catch (Exception e) {
+                    log.warn("listSessions 反序列化失败: sessionId={}, err={}", sessionId, e.getMessage());
+                    continue;
                 }
+            } else {
+                continue;
+            }
+            sessions.add(session);
+        }
+
+        // 批量清理脏索引 field，避免下次重复扫描无效 sessionId
+        if (!staleIds.isEmpty()) {
+            try {
+                redisTemplate.opsForHash().delete(indexKey, staleIds.toArray());
+                log.debug("listSessions 懒清理脏索引: userId={}, count={}", currentUserId, staleIds.size());
+            } catch (Exception e) {
+                log.warn("listSessions 懒清理失败: userId={}, err={}", currentUserId, e.getMessage());
+            }
+        }
+
+        // 批量从 DB 补 title 到 VO(一次性 in 查询, 避免 N+1)
+        if (!sessions.isEmpty()) {
+            try {
+                java.util.List<String> sidList = sessions.stream()
+                        .map(AgentSessionVO::getSessionId)
+                        .toList();
+                java.util.Map<String, com.hypersense.boot.agents.model.entity.AgentSessionEntity> dbMap = agentSessionService
+                        .getBySessionIds(sidList).stream()
+                        .collect(java.util.stream.Collectors.toMap(
+                                com.hypersense.boot.agents.model.entity.AgentSessionEntity::getSessionId, e -> e, (a, b) -> a));
+                for (AgentSessionVO s : sessions) {
+                    com.hypersense.boot.agents.model.entity.AgentSessionEntity row = dbMap.get(s.getSessionId());
+                    if (row != null && row.getTitle() != null && !row.getTitle().isBlank()) {
+                        s.setTitle(row.getTitle());
+                    }
+                }
+            } catch (Exception e) {
+                log.warn("listSessions 批量补 DB 字段失败(不阻塞主流程): userId={}, err={}",
+                        currentUserId, e.getMessage());
             }
         }
 
         return sessions.stream()
                 .sorted((s1, s2) -> s2.getUpdatedAt().compareTo(s1.getUpdatedAt()))
                 .toList();
+    }
+
+    /**
+     * 懒迁移：索引 Key 首次缺失时，扫描 {@code agent:session:*} 找出属于当前用户的旧会话，
+     * 回填到用户索引 Hash。仅索引 Key 完全不存在时触发一次，后续不再走 keys 路径。
+     * <p>
+     * 注意：Redis 空 Hash 不存在 key，无法靠「空 hash」做标记。这里用一个专门的占位 field
+     * {@code __migrated__} 锁定已迁移状态，避免 keys 为空时反复触发全键扫描。
+     * </p>
+     */
+    private void migrateLegacySessions(Long currentUserId, String indexKey) {
+        // 先写入占位 field 标记已迁移，保证后续 hasKey(indexKey) 恒为 true
+        redisTemplate.opsForHash().put(indexKey, "__migrated__", "");
+
+        String pattern = StrUtil.format(RedisConstants.Agent.SESSION, "*");
+        Set<String> keys = redisTemplate.keys(pattern);
+        if (keys == null || keys.isEmpty()) {
+            log.info("listSessions 懒迁移: userId={} 无历史会话", currentUserId);
+            return;
+        }
+        int migrated = 0;
+        for (String key : keys) {
+            Object value = redisTemplate.opsForValue().get(key);
+            if (value == null) continue;
+            AgentSessionVO session;
+            if (value instanceof AgentSessionVO) {
+                session = (AgentSessionVO) value;
+            } else if (value instanceof java.util.Map) {
+                try {
+                    com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+                    mapper.registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule());
+                    session = mapper.convertValue(value, AgentSessionVO.class);
+                } catch (Exception e) {
+                    continue;
+                }
+            } else {
+                continue;
+            }
+            if (currentUserId.equals(session.getUserId())) {
+                redisTemplate.opsForHash().put(indexKey, session.getSessionId(), "");
+                migrated++;
+            }
+        }
+        log.info("listSessions 懒迁移完成: userId={}, migrated={}", currentUserId, migrated);
+    }
+
+    @Override
+    public AgentSessionVO updateSessionMeta(String sessionId, String title, Boolean pinned) {
+        // 复用既有鉴权：校验会话存在且属于当前登录用户
+        AgentSessionVO session = getAndValidateSession(sessionId);
+
+        boolean titleUpdated = title != null && !title.trim().isEmpty();
+        boolean pinnedUpdated = pinned != null;
+        if (titleUpdated) {
+            session.setTitle(title.trim());
+        }
+        if (pinnedUpdated) {
+            session.setPinned(pinned);
+        }
+        if (titleUpdated || pinnedUpdated) {
+            session.setUpdatedAt(LocalDateTime.now());
+            saveSession(session);
+            log.info("updateSessionMeta OK: sessionId={}, userId={}, titleUpdated={}, pinnedUpdated={}",
+                    sessionId, session.getUserId(), titleUpdated, pinnedUpdated);
+        }
+        // 同步 title 到 DB（projectId 不在此方法更新, 由 PATCH /binding 端点单独处理）
+        if (titleUpdated) {
+            try {
+                agentSessionService.updateTitle(sessionId, title.trim());
+            } catch (Exception e) {
+                log.warn("updateSessionMeta 同步 DB title 失败（不阻塞）: sessionId={}, err={}",
+                        sessionId, e.getMessage());
+            }
+        }
+        return session;
     }
 
     @Override
@@ -1385,6 +1805,14 @@ public class AgentServiceImpl implements AgentService {
         String key = sessionKey(sessionId);
         redisTemplate.delete(key);
 
+        // 同步移除「用户 → sessionId」索引（懒清理兜底，失败不影响删除主流程）
+        try {
+            redisTemplate.opsForHash().delete(sessionIndexKey(session.getUserId()), sessionId);
+        } catch (Exception e) {
+            log.warn("deleteSession 移除索引失败: userId={}, sessionId={}, err={}",
+                    session.getUserId(), sessionId, e.getMessage());
+        }
+
         // 关闭 SSE 连接（如果存在）
         SseEmitter emitter = activeEmitters.remove(sessionId);
         if (emitter != null) {
@@ -1393,6 +1821,14 @@ public class AgentServiceImpl implements AgentService {
             } catch (Exception e) {
                 log.warn("关闭 SSE 连接失败: sessionId={}", sessionId, e);
             }
+        }
+
+        // 同步删除 DB 关联记录（失败不阻塞删除主流程）
+        try {
+            agentSessionService.deleteBySessionId(sessionId);
+        } catch (Exception e) {
+            log.warn("deleteSession 同步 DB 删除失败（不阻塞）: sessionId={}, err={}",
+                    sessionId, e.getMessage());
         }
 
         log.info("Agent 会话已删除: sessionId={}, userId={}", sessionId, session.getUserId());
@@ -1582,10 +2018,62 @@ public class AgentServiceImpl implements AgentService {
     }
 
     /**
+     * 读取会话当前绑定的 LLM 模型配置 ID。
+     * <p>
+     * session 通过 Redis {@link #loadSessionInternal} 读取。
+     * </p>
+     * <p>
+     * <b>鉴权策略</b>：本方法主要供沙箱内工具（如 FileReadTool）在
+     * {@code agent-exec-X} 异步线程内调用，此时 {@link #getCurrentUserId} 依赖的
+     * {@code SecurityContextHolder}（默认 MODE_THREADLOCAL）上下文无法跨线程传递，
+     * 调用 getCurrentUserId 会抛 BusinessException 导致永远返回 null。
+     * 因此：
+     * <ol>
+     *   <li>优先尝试用 getCurrentUserId 做归属校验（HTTP 主线程场景，强鉴权）</li>
+     *   <li>拿不到用户上下文时退化为 expectedUserId=null 跳过归属校验
+     *       （异步线程场景；session 归属已在 streamExecute/execute 入口校验过，
+     *       且 sessionId 为随机 UUID 无法伪造）</li>
+     * </ol>
+     * </p>
+     *
+     * @param sessionId 会话 ID
+     * @return modelConfigId；session 不存在或异常时返回 null
+     */
+    @Override
+    public Long getSessionModelConfigId(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return null;
+        }
+        // 优先用当前线程用户身份做鉴权；拿不到（agent-exec 异步线程）则跳过归属校验
+        Long expectedUserId = null;
+        try {
+            expectedUserId = getCurrentUserId();
+        } catch (Exception ignored) {
+            // 异步线程内 SecurityContextHolder 不可用，退化到不鉴权模式
+        }
+        try {
+            AgentSessionVO session = loadSessionInternal(sessionId, expectedUserId);
+            if (session == null) {
+                log.warn("[getSessionModelConfigId] session 为 null sessionId={} expectedUserId={}",
+                        sessionId, expectedUserId);
+                return null;
+            }
+            Long mid = session.getModelConfigId();
+            log.info("[getSessionModelConfigId] sessionId={} expectedUserId={} sessionUserId={} → modelConfigId={}",
+                    sessionId, expectedUserId, session.getUserId(), mid);
+            return mid;
+        } catch (Exception e) {
+            log.warn("[getSessionModelConfigId] 读取 session 失败 sessionId={} expectedUserId={} err={}",
+                    sessionId, expectedUserId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
      * 把附件路径列表作为上下文提示注入到 userInput 之前。
      * <p>
      * 增强：明确指代关系（用户消息中"这个图片/这个文件/该附件"等指代即以下附件），
-     * 并提示正确的工具（sandbox + action=read_file），避免误用 internet_search。
+     * 并提示正确的工具（read_file），避免误用 internet_search。
      * </p>
      */
     private String injectAttachmentContext(String userInput, List<String> attachmentPaths) {
@@ -1604,9 +2092,12 @@ public class AgentServiceImpl implements AgentService {
               .append(", 类型: ").append(mime).append("）\n");
             // TODO: 若需精确 size，可在此调 sandbox.listFiles 获取元信息；当前省略以避免额外 IO。
         }
-        sb.append("\n[工具使用提示] 如需读取附件内容/查看附件属性/操作附件，")
-          .append("请使用 sandbox 工具（action=read_file, path=<上方路径>）或 action=list_dir 列出 uploads 目录。")
-          .append("**不要**用 internet_search 搜索附件相关内容——附件就在沙箱内，直接读即可。\n\n");
+        sb.append("\n[工具使用规则]\n")
+          .append("- 当用户要求「了解/查看/分析/读取」某个文件、附件、文档时，**必须**调用 read_file 工具（而非 internet_search 或直接回复）\n")
+          .append("- 若不确定文件路径，先用 sandbox（action=list_dir）列出 uploads/ 目录\n")
+          .append("- 大文件会自动摘要；若用户追问细节，使用 read_file 的 offset/maxLines 参数分批读取\n")
+          .append("- 图片文件：若当前模型不支持视觉，工具会返回提示，请如实告知用户并建议切换模型\n")
+          .append("- **不要**用 internet_search 搜索附件相关内容——附件就在沙箱内，直接 read_file 即可\n\n");
         sb.append(userInput == null ? "" : userInput);
         return sb.toString();
     }
@@ -1621,6 +2112,113 @@ public class AgentServiceImpl implements AgentService {
         int dot = filename.lastIndexOf('.');
         if (dot < 0 || dot == filename.length() - 1) return "";
         return filename.substring(dot + 1).toLowerCase();
+    }
+
+    // ========== 多模态图片下发辅助方法 ==========
+    // 设计：当 attachmentPaths 包含图片且当前会话模型支持视觉时，
+    //       构造 UserMessage(TextContent + ImageContent...) 把图片字节真正下发到 LLM；
+    //       任何异常都由 buildInitialState 上层 try-catch 兜底降级为文本提示。
+
+    /** 最大图片大小：5MB（与产品约定） */
+    private static final long MAX_IMAGE_SIZE_BYTES = 5L * 1024 * 1024;
+    /** 单消息最多图片张数：3 张（与产品约定） */
+    private static final int MAX_IMAGES_PER_MESSAGE = 3;
+    /** 图片扩展名白名单 */
+    private static final Set<String> IMAGE_EXTENSIONS = Set.of(
+            "png", "jpg", "jpeg", "gif", "webp", "bmp"
+    );
+
+    /**
+     * 从 attachmentPaths 中筛选图片附件（按扩展名白名单）。
+     */
+    private List<String> filterImageAttachments(List<String> attachmentPaths) {
+        if (attachmentPaths == null || attachmentPaths.isEmpty()) {
+            return List.of();
+        }
+        return attachmentPaths.stream()
+                .filter(p -> p != null && !p.isBlank())
+                .filter(p -> IMAGE_EXTENSIONS.contains(extractExtension(p)))
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * 推断图片 MIME 类型（参考 FileReadTool 的图片白名单）。
+     * 未知扩展名回退到 application/octet-stream（极少触发，因 filterImageAttachments 已限定白名单）。
+     */
+    private String guessImageMimeType(String path) {
+        String ext = extractExtension(path);
+        return switch (ext) {
+            case "png" -> "image/png";
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "gif" -> "image/gif";
+            case "webp" -> "image/webp";
+            case "bmp" -> "image/bmp";
+            default -> "application/octet-stream";
+        };
+    }
+
+    /**
+     * 判断当前会话绑定的模型是否支持视觉输入。
+     * <p>
+     * 复用本类已实现的 {@link #getSessionModelConfigId}，再查
+     * {@code sys_llm_model_config.supports_vision}（1=支持）。
+     * 任何异常都返回 false（保守降级为文本路径）。
+     * </p>
+     */
+    private boolean supportsVisionForSession(String sessionId) {
+        try {
+            Long modelConfigId = getSessionModelConfigId(sessionId);
+            if (modelConfigId == null) {
+                return false;
+            }
+            com.hypersense.boot.system.model.entity.LlmModelConfig mc =
+                    llmModelConfigService.getById(modelConfigId);
+            return mc != null && Integer.valueOf(1).equals(mc.getSupportsVision());
+        } catch (Exception e) {
+            log.warn("[supportsVisionForSession] 判断失败 sessionId={}: {}", sessionId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 构造多模态 {@link UserMessage}：{@link TextContent}（用户原文） + 多个 {@link ImageContent}。
+     * <p>
+     * 超限处理：单图超 5MB 或图片数超 3 张 → 抛 {@link IllegalArgumentException}，
+     * 由 {@link #buildInitialState} 上层 try-catch 捕获后降级为文本提示路径。
+     * </p>
+     * <p>
+     * base64 编码与 {@link ImageContent} 构造方式与 ToolNode/FileReadTool 一致，
+     * OpenAiChatModel 会自动把 ImageContent 转为 {@code image_url} 格式发到 OpenAI 兼容 API。
+     * </p>
+     */
+    private UserMessage buildMultimodalUserMessage(String userInput, List<String> imagePaths, String sessionId) {
+        if (imagePaths.size() > MAX_IMAGES_PER_MESSAGE) {
+            throw new IllegalArgumentException(
+                    "单消息最多 " + MAX_IMAGES_PER_MESSAGE + " 张图片，当前 " + imagePaths.size() + " 张");
+        }
+
+        Sandbox sandbox = sandboxManager.getOrCreate(sessionId);
+        List<Content> contents = new ArrayList<>();
+        contents.add(TextContent.from(userInput == null ? "" : userInput));
+
+        for (String path : imagePaths) {
+            byte[] bytes = sandbox.readAllBytes(path);
+            if (bytes == null || bytes.length == 0) {
+                throw new IllegalArgumentException("图片 " + path + " 读取为空字节");
+            }
+            if (bytes.length > MAX_IMAGE_SIZE_BYTES) {
+                throw new IllegalArgumentException(
+                        "图片 " + path + " 超过 5MB 上限（实际 "
+                                + (bytes.length / 1024 / 1024) + "MB）");
+            }
+            String base64 = Base64.getEncoder().encodeToString(bytes);
+            String mimeType = guessImageMimeType(path);
+            contents.add(ImageContent.from(base64, mimeType));
+            log.info("[buildMultimodalUserMessage] 已附加图片 {} ({} KB, {})",
+                    path, bytes.length / 1024, mimeType);
+        }
+
+        return UserMessage.from(contents.toArray(new Content[0]));
     }
 
     private static String guessMimeType(String fileName) {

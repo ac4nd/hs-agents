@@ -10,8 +10,8 @@ general:
 search:
   # 安全搜索模式（0=关闭，1=中等，2=严格）
   safe_search: 0
-  # 默认语言（auto=自动检测，zh-CN=简体中文）
-  default_lang: "auto"
+  # 默认语言（强制简体中文，避免 auto fallback 到英文导致命中率下降）
+  default_lang: "zh-CN"
   # 搜索结果格式
   formats:
     - html
@@ -60,4 +60,20 @@ engines:
   - name: stackoverflow
     engine: stackoverflow
     shortcut: st
+    disabled: false
+
+  # === 中文搜索引擎（补齐本土查询命中率）===
+  - name: baidu
+    engine: baidu
+    shortcut: bd
+    disabled: false
+
+  - name: sogou
+    engine: sogou
+    shortcut: sg
+    disabled: false
+
+  - name: 360search
+    engine: 360search
+    shortcut: "360"
     disabled: false

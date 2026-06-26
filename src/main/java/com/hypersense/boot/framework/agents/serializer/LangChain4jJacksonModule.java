@@ -9,8 +9,13 @@ import com.fasterxml.jackson.databind.JsonSerializer;
 import com.fasterxml.jackson.databind.SerializerProvider;
 import com.fasterxml.jackson.databind.module.SimpleModule;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.data.image.Image;
 import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.Content;
+import dev.langchain4j.data.message.ContentType;
+import dev.langchain4j.data.message.ImageContent;
 import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.TextContent;
 import dev.langchain4j.data.message.UserMessage;
 import lombok.extern.slf4j.Slf4j;
 
@@ -24,7 +29,9 @@ import java.util.List;
  * 用于 {@code PostgresqlSaver} 通过 Jackson 将 Agent state Map 序列化为 JSONB。
  * 与 {@link LangChain4jStateSerializer}（ObjectStream 路径）保持字段语义一致：
  * <ul>
- *   <li>UserMessage / SystemMessage：仅保留文本</li>
+ *   <li>UserMessage：保留 name 与 contents（支持多模态：TextContent / ImageContent）；
+ *       兼容旧 text-only 格式（含 text 字段、无 contents 数组时按纯文本读取）</li>
+ *   <li>SystemMessage：仅保留文本</li>
  *   <li>AiMessage：保留 text 与 toolExecutionRequests</li>
  *   <li>ToolExecutionRequest：保留 id / name / arguments</li>
  * </ul>
@@ -55,7 +62,35 @@ public class LangChain4jJacksonModule extends SimpleModule {
         public void serialize(UserMessage value, JsonGenerator gen, SerializerProvider serializers) throws IOException {
             gen.writeStartObject();
             gen.writeStringField("type", "USER");
-            gen.writeStringField("text", value.singleText());
+            if (value.name() != null) {
+                gen.writeStringField("name", value.name());
+            }
+            gen.writeArrayFieldStart("contents");
+            for (Content c : value.contents()) {
+                writeContent(c, gen);
+            }
+            gen.writeEndArray();
+            gen.writeEndObject();
+        }
+
+        private static void writeContent(Content c, JsonGenerator gen) throws IOException {
+            gen.writeStartObject();
+            gen.writeStringField("type", c.type().name());
+            switch (c.type()) {
+                case TEXT -> gen.writeStringField("text", ((TextContent) c).text());
+                case IMAGE -> {
+                    Image img = ((ImageContent) c).image();
+                    if (img != null) {
+                        if (img.url() != null) gen.writeStringField("url", img.url().toString());
+                        if (img.base64Data() != null) gen.writeStringField("base64Data", img.base64Data());
+                        if (img.mimeType() != null) gen.writeStringField("mimeType", img.mimeType());
+                    }
+                    if (((ImageContent) c).detailLevel() != null) {
+                        gen.writeStringField("detailLevel", ((ImageContent) c).detailLevel().name());
+                    }
+                }
+                default -> log.warn("Jackson 路径暂不支持序列化 ContentType={}，已跳过", c.type());
+            }
             gen.writeEndObject();
         }
     }
@@ -64,8 +99,47 @@ public class LangChain4jJacksonModule extends SimpleModule {
         @Override
         public UserMessage deserialize(JsonParser p, DeserializationContext ctxt) throws IOException {
             JsonNode node = p.getCodec().readTree(p);
+            String name = node.hasNonNull("name") ? node.get("name").asText() : null;
+
+            // 新格式：含 contents 数组
+            if (node.hasNonNull("contents")) {
+                JsonNode arr = node.get("contents");
+                List<Content> contents = new ArrayList<>(arr.size());
+                for (JsonNode item : arr) {
+                    contents.add(readContent(item));
+                }
+                return name != null ? UserMessage.from(name, contents) : UserMessage.from(contents);
+            }
+
+            // 旧格式回退：仅 text 字段（纯文本历史 checkpoint）
             String text = node.hasNonNull("text") ? node.get("text").asText() : "";
             return UserMessage.from(text);
+        }
+
+        private static Content readContent(JsonNode item) throws IOException {
+            String typeName = item.hasNonNull("type") ? item.get("type").asText() : "TEXT";
+            ContentType type = ContentType.valueOf(typeName);
+            switch (type) {
+                case TEXT -> {
+                    return TextContent.from(item.get("text").asText());
+                }
+                case IMAGE -> {
+                    String url = item.hasNonNull("url") ? item.get("url").asText() : null;
+                    String base64 = item.hasNonNull("base64Data") ? item.get("base64Data").asText() : null;
+                    String mimeType = item.hasNonNull("mimeType") ? item.get("mimeType").asText() : null;
+                    String detailName = item.hasNonNull("detailLevel") ? item.get("detailLevel").asText() : null;
+                    ImageContent.DetailLevel level = detailName != null
+                            ? ImageContent.DetailLevel.valueOf(detailName) : null;
+                    if (url != null) {
+                        return level != null ? ImageContent.from(url, mimeType, level) : ImageContent.from(url, mimeType);
+                    }
+                    if (base64 != null) {
+                        return level != null ? ImageContent.from(base64, mimeType, level) : ImageContent.from(base64, mimeType);
+                    }
+                    throw new IOException("Invalid ImageContent: url 和 base64Data 均为空");
+                }
+                default -> throw new IOException("Jackson 路径暂不支持反序列化 ContentType=" + type);
+            }
         }
     }
 

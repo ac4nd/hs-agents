@@ -15,7 +15,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * 当 application.yml 配置 agent.memory.enabled=true 时自动激活。
  * 基于 Spring Boot Conditional 装配链：
  * <pre>
- * ZhipuEmbeddingClient → MemoryRepository → MemoryService → MemoryMiddleware
+ * AliyunEmbeddingClient → MemoryRepository → MemoryService → MemoryMiddleware
  * </pre>
  *
  * <h3>配置示例：</h3>
@@ -35,7 +35,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 public class MemoryAutoConfiguration {
 
     /**
-     * OpenAI 兼容 Embedding 客户端（RestTemplate 直调，支持智谱/百炼/OpenAI 等）
+     * 阿里云百炼（DashScope）OpenAI 兼容 Embedding 客户端（RestTemplate 直调）
      * <p>
      * 根据 {@code agent.llm.embedding-vendor} 选择 vendors Map 中对应厂商。
      * Embedding 模型名优先取 vendor 的 embedding-model，回退到 memory.embedding-model。
@@ -43,7 +43,7 @@ public class MemoryAutoConfiguration {
      */
     @Bean("memoryEmbeddingClient")
     @ConditionalOnProperty(prefix = "agent.memory", name = "enabled", havingValue = "true")
-    public ZhipuEmbeddingClient memoryEmbeddingClient(AgentProperties agentProperties) {
+    public AliyunEmbeddingClient memoryEmbeddingClient(AgentProperties agentProperties) {
         AgentProperties.LlmConfig llm = agentProperties.getLlm();
         AgentProperties.VendorConfig vendor = llm.resolveVendor(llm.getEmbeddingVendor());
         AgentProperties.MemoryConfig memConfig = agentProperties.getMemory();
@@ -54,7 +54,7 @@ public class MemoryAutoConfiguration {
 
         log.info("MemoryAutoConfiguration: 创建 Embedding 客户端, vendor={}, endpoint={}, model={}",
                 llm.getEmbeddingVendor(), vendor.getEndpoint(), model);
-        return new ZhipuEmbeddingClient(vendor.getEndpoint(), vendor.getApiKey(), model);
+        return new AliyunEmbeddingClient(vendor.getEndpoint(), vendor.getApiKey(), model);
     }
 
     /**
@@ -76,7 +76,7 @@ public class MemoryAutoConfiguration {
     @Bean
     @ConditionalOnBean(name = "memoryEmbeddingClient")
     public MemoryService memoryService(MemoryRepository repository,
-                                       ZhipuEmbeddingClient embeddingClient,
+                                       AliyunEmbeddingClient embeddingClient,
                                        ChatModel chatModel,
                                        AgentProperties agentProperties) {
         log.info("MemoryAutoConfiguration: MemoryService 已创建");

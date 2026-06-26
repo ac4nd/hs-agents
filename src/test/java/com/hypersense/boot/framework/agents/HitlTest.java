@@ -1,5 +1,6 @@
 package com.hypersense.boot.framework.agents;
 
+import com.hypersense.boot.agents.service.AgentSessionService;
 import com.hypersense.boot.agents.service.impl.AgentServiceImpl;
 import com.hypersense.boot.common.constant.RedisConstants;
 import com.hypersense.boot.common.exception.BusinessException;
@@ -77,7 +78,7 @@ class HitlTest {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
 
         TaskExecutor taskExecutor = Runnable::run;
-        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null);
+        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(AgentSessionService.class));
 
         securityUtilsMock = mockStatic(SecurityUtils.class);
         securityUtilsMock.when(SecurityUtils::getUserId).thenReturn(MOCK_USER_ID);

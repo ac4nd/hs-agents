@@ -24,4 +24,9 @@ public @interface RepeatSubmit {
      */
     int expire() default 5;
 
+    /**
+     * 命中重复提交时返回的提示文案，默认"请勿重复提交"
+     */
+    String message() default "请勿重复提交";
+
 }
