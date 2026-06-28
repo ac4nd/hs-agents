@@ -468,6 +468,37 @@ public class AgentServiceImpl implements AgentService {
                 }
 
                 // 正常完成
+                // === 静态串联检查：若有 secondary profile，发送 handoff 事件（Plan A 新增） ===
+                // Plan A：只 emit 事件，不自动启动下一个 profile，前端收到后发起新的 streamExecute
+                @SuppressWarnings("unchecked")
+                java.util.List<String> secondaryProfiles = (java.util.List<String>) initialState.getOrDefault(
+                        com.hypersense.boot.framework.agents.model.DeepAgentState.SECONDARY_PROFILES,
+                        java.util.List.of());
+                if (secondaryProfiles != null && !secondaryProfiles.isEmpty()) {
+                    String currentProfile = (String) initialState.getOrDefault(
+                            com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE, "unknown");
+                    String nextProfile = secondaryProfiles.get(0);
+                    java.util.List<String> remaining = new java.util.ArrayList<>(
+                            secondaryProfiles.subList(1, secondaryProfiles.size()));
+                    AgentEvent handoffEvent = AgentEvent.builder()
+                            .type(com.hypersense.boot.framework.agents.enums.AgentEventType.PROFILE_HANDOFF)
+                            .message("上游 profile " + currentProfile + " 已完成，下一个：" + nextProfile)
+                            .data(java.util.Map.of(
+                                    "fromProfile", currentProfile,
+                                    "toProfile", nextProfile,
+                                    "remaining", remaining,
+                                    "context", "sessions/" + sessionId + "/output.md"))
+                            .timestamp(System.currentTimeMillis())
+                            .build();
+                    try {
+                        emitter.send(SseEmitter.event().name("agent_event").data(handoffEvent));
+                        log.info("Profile handoff emitted: from={}, to={}, sessionId={}",
+                                currentProfile, nextProfile, sessionId);
+                    } catch (Exception ex) {
+                        log.warn("Failed to emit PROFILE_HANDOFF event. sessionId={}", sessionId, ex);
+                    }
+                }
+
                 AgentEvent completeEvent = AgentEvent.builder()
                         .type(AgentEventType.FINAL_RESPONSE)
                         .message("执行完成")
