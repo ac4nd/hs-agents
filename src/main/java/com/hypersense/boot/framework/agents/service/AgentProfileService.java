@@ -5,9 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hypersense.boot.framework.agents.mapper.AgentProfileMapper;
 import com.hypersense.boot.framework.agents.model.AgentProfileEntity;
 import com.hypersense.boot.framework.agents.profile.*;
+import com.hypersense.boot.framework.agents.profile.impl.DesignProfile;
 import com.hypersense.boot.framework.agents.profile.impl.GenericProfile;
 import com.hypersense.boot.framework.agents.profile.impl.StubCodeProfile;
-import com.hypersense.boot.framework.agents.profile.impl.StubDesignProfile;
 import com.hypersense.boot.common.annotation.IgnoreTenant;
 import org.springframework.stereotype.Service;
 
@@ -57,7 +57,7 @@ public class AgentProfileService {
         PlanStrategy strategy = PlanStrategy.fromString(entity.getPlanStrategy());
 
         return switch (id) {
-            case "design" -> com.hypersense.boot.framework.agents.profile.impl.DesignProfile.withBrandColor(
+            case "design" -> DesignProfile.withBrandColor(
                     resolveBrandPrimary(outputFormat), template, tools, outputFormat, policy);
             case "code" -> new StubCodeProfile(id, name, template, tools, strategy, outputFormat, policy);
             default -> new GenericProfile(id, name, template, tools, strategy, outputFormat, policy);
