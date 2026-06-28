@@ -64,8 +64,9 @@ public class AgentController {
                                     @RequestParam(required = false) Long modelConfigId,
                                     @RequestParam(required = false) List<String> attachmentPaths,
                                     @RequestParam(required = false) Long designSystemId,
-                                    @RequestParam(required = false) String designSystemType) {
-        return agentService.streamExecute(sessionId, input, modelConfigId, attachmentPaths, designSystemId, designSystemType);
+                                    @RequestParam(required = false) String designSystemType,
+                                    @RequestParam(required = false, defaultValue = "false") Boolean designSystemEnabled) {
+        return agentService.streamExecute(sessionId, input, modelConfigId, attachmentPaths, designSystemId, designSystemType, designSystemEnabled);
     }
 
     @Operation(summary = "上传会话附件",

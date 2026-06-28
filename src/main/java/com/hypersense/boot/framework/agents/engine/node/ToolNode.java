@@ -388,10 +388,21 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                     .maxOutputTokens(8192)
                     .build();
 
+            // 主线程捕获事件消费者（langchain4j 流式回调在 HTTP 线程，ThreadLocal 拿不到）
+            final java.util.function.Consumer<com.hypersense.boot.framework.agents.model.AgentEvent> eventConsumer =
+                    com.hypersense.boot.framework.agents.engine.SubAgentEventBus.get();
+            // 流式 token 节流状态：200ms 节流 + 累积全文（前端可直接用 accumulated 覆盖式渲染）
+            final StringBuilder codeAccumulator = new StringBuilder();
+            final long[] lastEmitTime = {0};
+            final String streamSessionId = state.sessionId();
+            final String streamTodoId = todo.getId();
+            final String streamTodoDesc = todo.getDescription();
+
             streamingChatModel.chat(req, new dev.langchain4j.model.chat.response.StreamingChatResponseHandler() {
                 @Override
                 public void onPartialResponse(String partialResponse) {
-                    // 不做处理，避免日志噪音
+                    emitCodeStreaming(eventConsumer, codeAccumulator, lastEmitTime,
+                            streamTodoId, streamTodoDesc, streamSessionId, partialResponse);
                 }
 
                 @Override
@@ -827,7 +838,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         // 2. 调用 LLM（不带 tools 参数）
         String rawText;
         if (streamingChatModel != null) {
-            rawText = callLlmStreamingForPlainText(messages);
+            rawText = callLlmStreamingForPlainText(messages, todo, state);
         } else {
             rawText = callLlmSyncForPlainText(messages);
         }
@@ -933,18 +944,31 @@ public class ToolNode implements NodeAction<DeepAgentState> {
 
     /**
      * 纯文本回退的流式调用：不带 tools，CompletableFuture 同步等待 10 分钟。
+     * <p>file_write 长 HTML 主要在此路径生成（function calling 模式 LLM 通常 content 残缺会回退到此），
+     * 必须在 onPartialResponse 中 emit CODE_STREAMING 事件，让前端流式展示代码 + 工作 loading 动画。</p>
      */
-    private String callLlmStreamingForPlainText(List<ChatMessage> messages) throws Exception {
+    private String callLlmStreamingForPlainText(List<ChatMessage> messages, TodoItem todo, DeepAgentState state) throws Exception {
         java.util.concurrent.CompletableFuture<ChatResponse> future = new java.util.concurrent.CompletableFuture<>();
         dev.langchain4j.model.chat.request.ChatRequest req = dev.langchain4j.model.chat.request.ChatRequest.builder()
                 .messages(messages)
                 // 注意：不带 .toolSpecifications(...)，绕开 function calling
                 .maxOutputTokens(8192)
                 .build();
+        // 主线程捕获事件消费者（langchain4j 流式回调在 HTTP 线程，ThreadLocal 拿不到）
+        final java.util.function.Consumer<AgentEvent> eventConsumer = SubAgentEventBus.get();
+        final StringBuilder codeAccumulator = new StringBuilder();
+        final long[] lastEmitTime = {0};
+        final String streamSessionId = state.sessionId();
+        final String streamTodoId = todo == null ? null : todo.getId();
+        final String streamTodoDesc = todo == null ? null : todo.getDescription();
+
         streamingChatModel.chat(req, new dev.langchain4j.model.chat.response.StreamingChatResponseHandler() {
             @Override
             public void onPartialResponse(String partialResponse) {
-                // 不做处理
+                // 与 function-call 路径复用同一节流 emit helper，前端收到 CODE_STREAMING 后
+                // 流式渲染代码气泡 + 工作区显示 generating 动画
+                emitCodeStreaming(eventConsumer, codeAccumulator, lastEmitTime,
+                        streamTodoId, streamTodoDesc, streamSessionId, partialResponse);
             }
 
             @Override
@@ -1146,6 +1170,51 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                 .timestamp(System.currentTimeMillis())
                 .build();
         consumer.accept(event);
+    }
+
+    /**
+     * 流式代码生成 SSE 推送（节流 200ms）。
+     * <p>function-call 路径与纯文本回退路径共用此 helper，
+     * 确保 file_write 长 HTML 生成期间前端能持续看到代码增量 + 工作 loading 动画。</p>
+     *
+     * @param consumer        主线程捕获的事件消费者（闭包传递，跨线程安全）
+     * @param accumulator     累积全文 buffer（多次调用追加）
+     * @param lastEmitTimeHolder 节流时间戳 holder（long[1]）
+     * @param todoId          当前 TODO id
+     * @param todoDesc        当前 TODO 描述
+     * @param sessionId       会话 id
+     * @param partialResponse 本次增量文本
+     */
+    private void emitCodeStreaming(
+            java.util.function.Consumer<AgentEvent> consumer,
+            StringBuilder accumulator,
+            long[] lastEmitTimeHolder,
+            String todoId, String todoDesc, String sessionId,
+            String partialResponse) {
+        if (partialResponse == null || partialResponse.isEmpty() || consumer == null) return;
+        accumulator.append(partialResponse);
+        long now = System.currentTimeMillis();
+        // 节流：距上次 emit ≥ 200ms 才发，避免 token 风暴压垮 SSE
+        if (now - lastEmitTimeHolder[0] < 200) return;
+        lastEmitTimeHolder[0] = now;
+        try {
+            java.util.Map<String, Object> data = new java.util.HashMap<>();
+            data.put("todoId", todoId);
+            data.put("todoDescription", todoDesc);
+            if (sessionId != null) data.put("sessionId", sessionId);
+            data.put("delta", partialResponse);
+            data.put("accumulated", accumulator.toString());
+            AgentEvent event = AgentEvent.builder()
+                    .type(AgentEventType.CODE_STREAMING)
+                    .message("生成代码中...")
+                    .data(data)
+                    .timestamp(now)
+                    .build();
+            consumer.accept(event);
+        } catch (Throwable t) {
+            // 流式回调异常绝不能影响主流程，仅记录
+            log.warn("ToolNode: CODE_STREAMING emit 失败（忽略）: {}", t.getMessage());
+        }
     }
 
     /**

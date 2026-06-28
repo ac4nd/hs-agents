@@ -42,6 +42,13 @@ public enum AgentEventType {
     NODE_EXECUTION("node_execution"),
     /** 文件已创建（file_write 成功落盘后通知前端刷新附件列表） */
     FILE_CREATED("file_created"),
+    /**
+     * 代码生成中（流式）
+     * <p>ToolNode 调用流式 LLM 生成 file_write content 时，节流 200ms 推送累积片段，
+     * 前端实时展示正在生成的代码 + 工作区 loading 动画。</p>
+     * <p>data 字段：todoId / todoDescription / sessionId / delta（增量）/ accumulated（累积全文）</p>
+     */
+    CODE_STREAMING("code_streaming"),
     /** 工具调用错误（透传工具失败原因给前端） */
     TOOL_ERROR("tool_error"),
     /** 审计警告（Finalize 输出含编造路径等违规内容时通知前端） */

@@ -74,6 +74,18 @@ public class AgentSessionServiceImpl
     }
 
     @Override
+    public AgentSessionEntity getBySessionId(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return null;
+        }
+        LambdaQueryWrapper<AgentSessionEntity> qw = new LambdaQueryWrapper<>();
+        qw.eq(AgentSessionEntity::getSessionId, sessionId);
+        // 使用 selectOne 且第二参数 throwEx=false, 多条命中时返回首条而非抛异常,
+        // 保证 fallback 路径在脏数据场景下仍可用
+        return baseMapper.selectOne(qw, false);
+    }
+
+    @Override
     public void updateTitle(String sessionId, String title) {
         if (sessionId == null || sessionId.isBlank()) return;
         LambdaUpdateWrapper<AgentSessionEntity> uw = new LambdaUpdateWrapper<>();

@@ -270,17 +270,20 @@ public class AgentServiceImpl implements AgentService {
 
     @Override
     public SseEmitter streamExecute(String sessionId, String userInput) {
-        return streamExecute(sessionId, userInput, null, null, null, null);
+        return streamExecute(sessionId, userInput, null, null, null, null, null);
     }
 
     @Override
     public SseEmitter streamExecute(String sessionId, String userInput, Long modelConfigId,
-                                    List<String> attachmentPaths, Long designSystemId, String designSystemType) {
+                                    List<String> attachmentPaths, Long designSystemId, String designSystemType,
+                                    Boolean designSystemEnabled) {
         // 防御性日志：追踪用户上传的附件与设计系统类型（便于排查多模态下发与设计系统注入链路）
-        log.info("[streamExecute] sessionId={} modelConfigId={} attachmentPaths={} designSystemId={} designSystemType={}",
+        // designSystemEnabled：前端面板折叠/关闭时显式传 false，作为后端兜底判断依据
+        boolean enabled = Boolean.TRUE.equals(designSystemEnabled);
+        log.info("[streamExecute] sessionId={} modelConfigId={} attachmentPaths={} designSystemId={} designSystemType={} designSystemEnabled={}",
                 sessionId, modelConfigId,
                 attachmentPaths == null ? 0 : attachmentPaths.size(),
-                designSystemId, designSystemType);
+                designSystemId, designSystemType, enabled);
 
         AgentSessionVO session = getAndValidateSession(sessionId);
 
@@ -382,7 +385,7 @@ public class AgentServiceImpl implements AgentService {
             boolean historyAppended = false; // 防止正常路径与 finally 重复追加
 
             try {
-                Map<String, Object> initialState = buildInitialState(sessionId, effectiveInput, session.getEnabledTools(), session.getHistorySummary(), session.getHistory(), currentUserId, currentTenantId, attachmentPaths, designSystemId, designSystemType);
+                Map<String, Object> initialState = buildInitialState(sessionId, effectiveInput, session.getEnabledTools(), session.getHistorySummary(), session.getHistory(), currentUserId, currentTenantId, attachmentPaths, designSystemId, designSystemType, designSystemEnabled);
                 // INFO 级别诊断：验证多轮上下文是否正确加载（用户报告"找不到历史内容"问题排查）
                 int histSize = session.getHistory() == null ? 0 : session.getHistory().size();
                 boolean hasSummary = session.getHistorySummary() != null && !session.getHistorySummary().isBlank();
@@ -469,9 +472,14 @@ public class AgentServiceImpl implements AgentService {
                 } else {
                     log.error("Agent SSE 流式执行失败: sessionId={}, userId={}", sessionId, sessionUserId, e);
                     try {
+                        LlmErrorClassification classified = classifyLlmError(e);
                         AgentEvent errorEvent = AgentEvent.builder()
                                 .type(AgentEventType.ERROR)
-                                .message("执行失败: " + e.getMessage())
+                                .message(classified.getUserMessage())
+                                .data(java.util.Map.of(
+                                        "errorType", classified.getErrorType(),
+                                        "userMessage", classified.getUserMessage(),
+                                        "detail", classified.getDetail()))
                                 .timestamp(System.currentTimeMillis())
                                 .build();
                         emitter.send(SseEmitter.event().name("agent_event").data(errorEvent));
@@ -555,6 +563,69 @@ public class AgentServiceImpl implements AgentService {
             cur = cur.getCause();
         }
         return false;
+    }
+
+    /**
+     * LLM 错误分类结果。errorType 供前端区分提示样式，userMessage 为面向用户的中文友好文案，
+     * detail 为原始异常消息（用于排查）。
+     */
+    private static class LlmErrorClassification {
+        private final String errorType;
+        private final String userMessage;
+        private final String detail;
+
+        LlmErrorClassification(String errorType, String userMessage, String detail) {
+            this.errorType = errorType;
+            this.userMessage = userMessage;
+            this.detail = detail;
+        }
+
+        public String getErrorType() { return errorType; }
+        public String getUserMessage() { return userMessage; }
+        public String getDetail() { return detail; }
+    }
+
+    /**
+     * 将底层 LLM 调用异常分类为可读的错误类型。
+     * 覆盖三类常见运维场景：余额不足 / Key 无效 / 限流。
+     * 其余归为 unknown，使用通用提示。
+     */
+    private LlmErrorClassification classifyLlmError(Throwable e) {
+        Throwable root = e;
+        int depth = 0;
+        while (root.getCause() != null && root.getCause() != root && depth++ < 8) {
+            root = root.getCause();
+        }
+        String raw = root.getMessage();
+        String msg = raw == null ? "" : raw.toLowerCase();
+        String detail = raw == null ? root.getClass().getName() : raw;
+
+        if (msg.contains("insufficient balance") || msg.contains("余额不足")
+                || msg.contains("account balance") || msg.contains("no enough balance")) {
+            return new LlmErrorClassification(
+                    "insufficient_balance",
+                    "当前大模型账户余额不足，请联系管理员充值或切换其他模型后重试",
+                    detail);
+        }
+        if (msg.contains("invalid api key") || msg.contains("invalid_api_key")
+                || msg.contains("unauthorized") || msg.contains("authentication")
+                || msg.contains("401")) {
+            return new LlmErrorClassification(
+                    "invalid_key",
+                    "大模型 API Key 无效或已过期，请联系管理员检查模型配置",
+                    detail);
+        }
+        if (msg.contains("rate limit") || msg.contains("rate_limit") || msg.contains("429")
+                || msg.contains("quota exceeded") || msg.contains("配额")) {
+            return new LlmErrorClassification(
+                    "rate_limit",
+                    "请求过于频繁或已达配额上限，请稍后重试或切换其他模型",
+                    detail);
+        }
+        return new LlmErrorClassification(
+                "unknown",
+                "智能体执行失败，请稍后重试；如持续失败请联系管理员",
+                detail);
     }
 
     @Override
@@ -696,7 +767,26 @@ public class AgentServiceImpl implements AgentService {
     }
 
     /**
-     * session 读取核心实现：反序列化 + 归属校验。
+     * session 读取核心实现：Redis 主缓存 → DB fallback → 反序列化 + 归属校验。
+     * <p>
+     * <b>缓存策略（fallback 语义）</b>：
+     * <ol>
+     *   <li>Redis 命中：直接走反序列化路径</li>
+     *   <li>Redis miss：fallback 查 DB（{@code agent_session} 表）
+     *     <ul>
+     *       <li>DB 命中：用 DB 实体重建 AgentSessionVO + 写回 Redis 缓存（按 sessionTtl）</li>
+     *       <li>DB miss：会话真失效（用户主动删除或从未创建），清理残留沙箱后抛 BusinessException</li>
+     *     </ul>
+     *   </li>
+     * </ol>
+     * </p>
+     * <p>
+     * <b>关键语义</b>：Redis TTL 过期 ≠ 会话失效，只是缓存失效；只有 DB 也无记录时才认为会话真不存在。
+     * </p>
+     * <p>
+     * <b>安全</b>：DB fallback 路径同样会对 {@code entity.userId} 做归属校验，
+     * 避免 Redis miss 后任意用户绕过鉴权直接拿 DB 数据。
+     * </p>
      *
      * @param sessionId       会话 ID
      * @param expectedUserId  期望归属的用户 ID；为 null 时跳过归属校验
@@ -709,7 +799,11 @@ public class AgentServiceImpl implements AgentService {
             log.debug("loadSessionInternal: key={}, valueClass={}", key, value == null ? "null" : value.getClass().getName());
         }
         if (value == null) {
-            throw new BusinessException("Agent 会话不存在: " + sessionId);
+            // Redis miss：fallback 查 DB 重建 Redis 会话对象
+            log.info("loadSessionInternal: Redis 未命中 sessionId={}, 查询 DB 重建会话", sessionId);
+            AgentSessionVO rebuilt = rebuildFromDbOrCleanup(sessionId, expectedUserId);
+            // DB 重建得到的 VO 直接返回（归属校验已在 rebuildFromDbOrCleanup 内完成）
+            return rebuilt;
         }
         // 由于 RedisConfig.disableDefaultTyping()，反序列化结果可能是 LinkedHashMap
         AgentSessionVO session;
@@ -751,6 +845,100 @@ public class AgentServiceImpl implements AgentService {
     }
 
     /**
+     * Redis miss 后的 DB fallback 路径：查 DB → 归属校验 → 重建 Redis 缓存 → 返回 VO.
+     * <p>
+     * 若 DB 也无记录：清理残留沙箱目录（防止孤儿沙箱占用资源），抛 BusinessException.
+     * </p>
+     *
+     * @param sessionId       会话 ID
+     * @param expectedUserId  期望归属用户 ID; null 时跳过归属校验（异步线程场景）
+     * @return 重建后的 AgentSessionVO
+     * @throws BusinessException DB 中也不存在该会话
+     */
+    private AgentSessionVO rebuildFromDbOrCleanup(String sessionId, Long expectedUserId) {
+        com.hypersense.boot.agents.model.entity.AgentSessionEntity entity;
+        try {
+            entity = agentSessionService.getBySessionId(sessionId);
+        } catch (Exception e) {
+            log.error("loadSessionInternal: 查询 DB 失败 sessionId={}, err={}", sessionId, e.getMessage(), e);
+            throw new BusinessException("Agent 会话不存在: " + sessionId);
+        }
+        if (entity == null) {
+            // DB 也无：会话真失效（用户已删除或从未创建），清理残留沙箱目录
+            log.warn("loadSessionInternal: 会话 {} 在 DB 中也不存在，清理残留沙箱目录", sessionId);
+            try {
+                sandboxManager.destroy(sessionId);
+            } catch (Exception e) {
+                log.warn("loadSessionInternal: 清理残留沙箱失败 sessionId={}, err={}", sessionId, e.getMessage());
+            }
+            throw new BusinessException("Agent 会话不存在: " + sessionId);
+        }
+
+        // DB 归属校验：防止 Redis miss 后任意用户绕过鉴权直接拿 DB 数据
+        if (expectedUserId != null && entity.getUserId() != null && !entity.getUserId().equals(expectedUserId)) {
+            log.warn("越权访问检测(DB fallback): userId={} 尝试访问 sessionId={}（属于 userId={}）",
+                    expectedUserId, sessionId, entity.getUserId());
+            throw new BusinessException("无权访问该会话");
+        }
+
+        // DB 命中：重建 VO + 写回 Redis 缓存
+        AgentSessionVO rebuilt = rebuildSessionFromEntity(entity);
+        try {
+            long ttl = agentProperties.getDeep().getSessionTtl();
+            redisTemplate.opsForValue().set(sessionKey(sessionId), rebuilt, ttl, TimeUnit.SECONDS);
+            log.info("loadSessionInternal: 从 DB 重建会话并写回 Redis 缓存 sessionId={}, ttl={}s", sessionId, ttl);
+        } catch (Exception e) {
+            // 写回缓存失败不影响后续流程，下次访问会再次走 DB fallback
+            log.warn("loadSessionInternal: 重建 Redis 缓存失败 sessionId={}, err={}", sessionId, e.getMessage());
+        }
+        return rebuilt;
+    }
+
+    /**
+     * 从 AgentSessionEntity 重建 AgentSessionVO.
+     * <p>
+     * <b>字段映射说明</b>：DB 表 {@code agent_session} 仅存储会话元信息索引（sessionId/userId/title/status），
+     * 运行时字段（modelConfigId、todos、files、history、hitl 配置、interrupt 上下文等）不落库，
+     * 重建时按以下策略赋默认值：
+     * <ul>
+     *   <li>{@code modelConfigId}：null（后续 getGraphOrThrow 会按 null 解析兜底单例）</li>
+     *   <li>{@code todos / files / history}：空集合（前端可重新发起对话补全）</li>
+     *   <li>{@code hitlEnabled}：false（保守降级，避免重建后误触发审批中断）</li>
+     *   <li>{@code status}：从 DB 字段解析；解析失败回退 {@link SessionStatus#CREATED}</li>
+     * </ul>
+     * </p>
+     */
+    private AgentSessionVO rebuildSessionFromEntity(
+            com.hypersense.boot.agents.model.entity.AgentSessionEntity entity) {
+        SessionStatus status;
+        try {
+            status = entity.getStatus() == null || entity.getStatus().isBlank()
+                    ? SessionStatus.CREATED
+                    : SessionStatus.valueOf(entity.getStatus());
+        } catch (IllegalArgumentException e) {
+            log.warn("rebuildSessionFromEntity: status 解析失败 sessionId={}, raw={}, 回退 CREATED",
+                    entity.getSessionId(), entity.getStatus());
+            status = SessionStatus.CREATED;
+        }
+        LocalDateTime now = LocalDateTime.now();
+        return AgentSessionVO.builder()
+                .sessionId(entity.getSessionId())
+                .userId(entity.getUserId())
+                .title(entity.getTitle())
+                .pinned(false)
+                .status(status)
+                .todos(List.of())
+                .files(Map.of())
+                .enabledTools(List.of())
+                .hitlEnabled(false)
+                .history(List.of())
+                .modelConfigId(null)
+                .createdAt(entity.getCreateTime() != null ? entity.getCreateTime() : now)
+                .updatedAt(entity.getUpdateTime() != null ? entity.getUpdateTime() : now)
+                .build();
+    }
+
+    /**
      * 构建图执行的初始状态（包含会话 ID、消息列表和启用的工具）
      * <p>
      * 如果 SkillsMiddleware 已注入（通过 SkillAutoConfiguration 条件装配），
@@ -761,7 +949,7 @@ public class AgentServiceImpl implements AgentService {
                                                   String historySummary,
                                                   List<AgentSessionVO.ConversationMessage> history,
                                                   Long userId, Long tenantId) {
-        return buildInitialState(sessionId, userInput, enabledTools, historySummary, history, userId, tenantId, null, null);
+        return buildInitialState(sessionId, userInput, enabledTools, historySummary, history, userId, tenantId, null, null, null, null);
     }
 
     private Map<String, Object> buildInitialState(String sessionId, String userInput, List<String> enabledTools,
@@ -770,7 +958,7 @@ public class AgentServiceImpl implements AgentService {
                                                   Long userId, Long tenantId,
                                                   List<String> attachmentPaths) {
         return buildInitialState(sessionId, userInput, enabledTools, historySummary, history, userId, tenantId,
-                attachmentPaths, null, null);
+                attachmentPaths, null, null, null);
     }
 
     private Map<String, Object> buildInitialState(String sessionId, String userInput, List<String> enabledTools,
@@ -779,7 +967,17 @@ public class AgentServiceImpl implements AgentService {
                                                   Long userId, Long tenantId,
                                                   List<String> attachmentPaths, Long designSystemId) {
         return buildInitialState(sessionId, userInput, enabledTools, historySummary, history, userId, tenantId,
-                attachmentPaths, designSystemId, null);
+                attachmentPaths, designSystemId, null, null);
+    }
+
+    private Map<String, Object> buildInitialState(String sessionId, String userInput, List<String> enabledTools,
+                                                  String historySummary,
+                                                  List<AgentSessionVO.ConversationMessage> history,
+                                                  Long userId, Long tenantId,
+                                                  List<String> attachmentPaths,
+                                                  Long designSystemId, String designSystemType) {
+        return buildInitialState(sessionId, userInput, enabledTools, historySummary, history, userId, tenantId,
+                attachmentPaths, designSystemId, designSystemType, null);
     }
 
     /**
@@ -793,13 +991,18 @@ public class AgentServiceImpl implements AgentService {
      * 多模态构造失败（图片超限/读取异常）会被 try-catch 兜底，自动降级为文本提示，
      * 避免图片处理问题导致整轮对话不可用。
      * </p>
+     * <p>
+     * 设计系统注入：仅当 {@code designSystemEnabled=true} 且 {@code designSystemId != null} 时才注入。
+     * 前端面板折叠/关闭时显式传 false，后端兜底跳过注入（防御性双校验：状态 + ID）。
+     * </p>
      */
     private Map<String, Object> buildInitialState(String sessionId, String userInput, List<String> enabledTools,
                                                   String historySummary,
                                                   List<AgentSessionVO.ConversationMessage> history,
                                                   Long userId, Long tenantId,
                                                   List<String> attachmentPaths,
-                                                  Long designSystemId, String designSystemType) {
+                                                  Long designSystemId, String designSystemType,
+                                                  Boolean designSystemEnabled) {
         Map<String, Object> initialState = new HashMap<>();
         initialState.put(DeepAgentState.SESSION_ID, sessionId);
         // 把会话内历史拼接到指令前缀，让 LLM 能看到多轮上下文（同一 session 内的连续性）
@@ -817,7 +1020,11 @@ public class AgentServiceImpl implements AgentService {
         //   - "template"（对应 UI 的 official 分类）→ getTemplateDetailById，查 sys_design_system_config_template
         //   - "personal" 或缺省 → getDetailById，查 sys_design_system_config
         // 两表 ID 独立，必须由前端携带类型参数指明查哪张表，禁止双表回查以避免误命中。
-        if (designSystemId != null) {
+        // 启用校验：仅当 designSystemEnabled=true 时才注入。
+        //   - 前端设计系统面板折叠/关闭时显式传 false（dsPanelOpen=false），后端兜底跳过注入；
+        //   - 即使前端因 bug 仍传 ID，只要 enabled != true，也不会注入（防御性双校验）。
+        boolean designSystemEnabledEffective = Boolean.TRUE.equals(designSystemEnabled);
+        if (designSystemEnabledEffective && designSystemId != null) {
             String brandSpec = null;
             String codeSpec = null;
             boolean isTemplate = "template".equalsIgnoreCase(designSystemType);
@@ -859,6 +1066,10 @@ public class AgentServiceImpl implements AgentService {
                 log.warn("[buildInitialState] 设计系统 id={} type={} 未找到记录，跳过注入",
                         designSystemId, isTemplate ? "template" : "personal");
             }
+        } else if (designSystemId != null && !designSystemEnabledEffective) {
+            // 显式记录"未启用"日志：前端传了 ID 但 enabled=false（面板折叠），按预期跳过注入
+            log.info("[buildInitialState] 设计系统未启用（面板折叠），跳过注入: sessionId={} designSystemId={}",
+                    sessionId, designSystemId);
         }
         // 技能目录注入（在历史拼接之后）
         if (skillsMiddleware != null && skillsMiddleware.hasSkills()) {

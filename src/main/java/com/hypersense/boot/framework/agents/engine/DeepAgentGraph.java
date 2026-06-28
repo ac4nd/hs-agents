@@ -183,7 +183,7 @@ public class DeepAgentGraph {
                 Map.of("execute", "execute", "finalize", "finalize", END, END));
         graph.addConditionalEdges("execute",
                 edge_async(routeAfterExecute),
-                Map.of("delegate", "delegate", "tool", "tool", "plan", "plan"));
+                Map.of("delegate", "delegate", "tool", "tool", "plan", "plan", "finalize", "finalize"));
         graph.addEdge("delegate", "plan");
         // 取消 plan 循环：工具完成后直接回 execute，由 ExecuteNode 选下一个 PENDING TODO。
         // 终止性由 RouteAfterExecute 的 allDone 短路 → finalize 保证。

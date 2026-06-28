@@ -67,10 +67,12 @@ public interface AgentService {
      *                        配合 designSystemType 一起使用：type=personal 查 sys_design_system_config，
      *                        type=template 查 sys_design_system_config_template
      * @param designSystemType 可选，设计系统类型：personal（个人）/ template（官方模板）。缺省时按 personal 处理
+     * @param designSystemEnabled 可选，设计系统是否启用；仅当传 true 时才注入 designSystemId 对应的 brandSpec/codeSpec。
+     *                             前端面板折叠/关闭时显式传 false，后端兜底跳过注入（即使 designSystemId 非空）
      * @return SSE 发射器
      */
     SseEmitter streamExecute(String sessionId, String userInput, Long modelConfigId, List<String> attachmentPaths,
-                             Long designSystemId, String designSystemType);
+                             Long designSystemId, String designSystemType, Boolean designSystemEnabled);
 
     /**
      * 切换会话绑定的 LLM 模型。

@@ -247,7 +247,8 @@ class SkillIntegrationTest {
 
             TaskExecutor taskExecutor = Runnable::run;
             agentService = new AgentServiceImpl(deepAgentGraph, agentProperties,
-                    redisTemplate, taskExecutor, sandboxManager, middleware, null, null, null, null, null, mock(AgentSessionService.class));
+                    redisTemplate, taskExecutor, sandboxManager, middleware, null, null, null, null, null,
+                    mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class));
 
             securityUtilsMock = mockStatic(SecurityUtils.class);
             securityUtilsMock.when(SecurityUtils::getUserId).thenReturn(MOCK_USER_ID);
@@ -279,7 +280,8 @@ class SkillIntegrationTest {
             AgentProperties propsNoSkills = new AgentProperties();
             TaskExecutor taskExecutor = Runnable::run;
             AgentServiceImpl serviceNoSkills = new AgentServiceImpl(
-                    deepAgentGraph, propsNoSkills, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(AgentSessionService.class));
+                    deepAgentGraph, propsNoSkills, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null,
+                    mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class));
 
             securityUtilsMock = mockStatic(SecurityUtils.class);
             securityUtilsMock.when(SecurityUtils::getUserId).thenReturn(MOCK_USER_ID);
