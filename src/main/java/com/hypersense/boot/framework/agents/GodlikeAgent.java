@@ -725,10 +725,10 @@ public class GodlikeAgent {
             com.hypersense.boot.framework.agents.serializer.AttachmentContext attachmentCtx =
                     new com.hypersense.boot.framework.agents.serializer.AttachmentContext(
                             sandboxManager, null, null);
-            // 非 Spring 构建路径：profileRegistry 传 null，PlanNode.buildProfilePromptPrefix 捕获 NPE 后
-            // 返回空串，降级走原 PLAN_SYSTEM_PROMPT（独立 Builder 不接入 CapabilityProfile 框架）
+            // 非 Spring 构建路径：profileRegistry 传 null，PlanNode.buildProfilePromptPrefix / ExecuteNode.buildStrategyHint
+            // 捕获 NPE 后返回空串，降级走原 PLAN_SYSTEM_PROMPT / EXECUTE_SYSTEM_PROMPT（独立 Builder 不接入 CapabilityProfile 框架）
             PlanNode planNode = new PlanNode(model, disabledGate, defaultProps, attachmentCtx, null);
-            ExecuteNode executeNode = new ExecuteNode(model, disabledGate, attachmentCtx);
+            ExecuteNode executeNode = new ExecuteNode(model, disabledGate, attachmentCtx, null);
             DelegateNode delegateNode = new DelegateNode(model, tools, subAgentDefinitions, sandboxManager);
             ToolNode toolNode = ToolNode.create(tools, toolRetryConfig, model, streamingChatModel);
             FinalizeNode finalizeNode = new FinalizeNode(model, attachmentCtx);

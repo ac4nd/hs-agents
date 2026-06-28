@@ -61,6 +61,7 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
     private final ChatModel chatModel;
     private final HitlGateChecker hitlGateChecker;
     private final AttachmentContext attachmentContext;
+    private final com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry;
 
     /**
      * 已废除的 direct 策略常量。
@@ -218,7 +219,7 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
             // 让决策 LLM 能感知附件指代，避免在附件场景误判 direct/delegate 而绕过 sandbox 工具。
             String userContext = state.instructions() != null ? state.instructions() : "";
             List<ChatMessage> messages = List.of(
-                    SystemMessage.from(EXECUTE_SYSTEM_PROMPT),
+                    SystemMessage.from(buildStrategyHint(state) + EXECUTE_SYSTEM_PROMPT),
                     UserMessage.from("任务描述：" + todo.getDescription()
                             + "\n\n用户上下文（含附件信息，如有）：" + userContext)
             );
@@ -243,6 +244,29 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
             // 异常时默认 tool（不再回退 direct），确保不绕过工具链路
             log.warn("执行策略决策失败，默认使用 tool: {}", e.getMessage());
             return new StrategyDecision(STRATEGY_TOOL, false);
+        }
+    }
+
+    /**
+     * 按 active profile 的 planStrategy 返回拆分 TODO 的策略提示（Plan A 框架接入点）。
+     * profile 未设置/加载失败时返回空串，保留原拆分逻辑。
+     */
+    private String buildStrategyHint(DeepAgentState state) {
+        if (state == null) return "";
+        String activeProfileId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE).orElse(null);
+        if (activeProfileId == null || activeProfileId.isBlank()) return "";
+        try {
+            com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId);
+            return switch (profile.planStrategy()) {
+                case OUTLINE_DEMO -> "\n【拆分策略】先输出 outline + 1 个 demo 项，待用户审批后再批量输出剩余 TODO。\n";
+                case TDD -> "\n【拆分策略】TODO 顺序：(1) file_read 相关代码 (2) file_write 失败测试 (3) 等待用户审批测试方向 (4) file_write 实现 (5) sandbox_exec 测试 (6) lint。\n";
+                case DIVERGE_THEN_STRUCTURE -> "\n【拆分策略】TODO 顺序：(1) 多轮 internet_search/web_reader 调研 (2) 收敛结论 (3) 推导 SMART 任务 (4) HITL 审批。\n";
+                case OUTLINE_THEN_FILL -> "\n【拆分策略】TODO 顺序：(1) 输出文档 outline (2) 逐板块撰写。\n";
+                case LAYERED_LEARNING -> "\n【拆分策略】TODO 顺序：(1) 评估用户水平 (2) 制定学习路径 (3) 由浅入深配示例。\n";
+                case GENERIC -> "";
+            };
+        } catch (Exception e) {
+            return "";
         }
     }
 

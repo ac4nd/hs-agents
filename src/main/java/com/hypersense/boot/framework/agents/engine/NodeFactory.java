@@ -50,7 +50,7 @@ public class NodeFactory {
     }
 
     public ExecuteNode executeNode(ChatModel chatModel) {
-        return new ExecuteNode(chatModel, hitlGateChecker, attachmentContext);
+        return new ExecuteNode(chatModel, hitlGateChecker, attachmentContext, profileRegistry);
     }
 
     public FinalizeNode finalizeNode(ChatModel chatModel) {
