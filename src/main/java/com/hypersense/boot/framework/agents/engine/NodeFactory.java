@@ -43,9 +43,10 @@ public class NodeFactory {
     private final List<ToolProvider> toolProviders;
     private final SandboxManager sandboxManager;
     private final AttachmentContext attachmentContext;
+    private final com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry;
 
     public PlanNode planNode(ChatModel chatModel) {
-        return new PlanNode(chatModel, hitlGateChecker, agentProperties, attachmentContext);
+        return new PlanNode(chatModel, hitlGateChecker, agentProperties, attachmentContext, profileRegistry);
     }
 
     public ExecuteNode executeNode(ChatModel chatModel) {

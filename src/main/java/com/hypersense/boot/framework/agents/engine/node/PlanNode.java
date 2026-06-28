@@ -57,6 +57,7 @@ public class PlanNode implements NodeAction<DeepAgentState> {
     private final HitlGateChecker hitlGateChecker;
     private final AgentProperties agentProperties;
     private final AttachmentContext attachmentContext;
+    private final com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry;
 
     /** 连续解析失败的最大容忍次数，超过后将所有 PENDING TODO 标记为 FAILED 以打破循环 */
     private static final int MAX_PARSE_FAILURES = 3;
@@ -292,7 +293,7 @@ public class PlanNode implements NodeAction<DeepAgentState> {
                 .buildMultimodal(state.sessionId(), userPrompt, state.attachmentPaths())
                 .orElseGet(() -> UserMessage.from(userPrompt));
         List<ChatMessage> messages = List.of(
-                SystemMessage.from(PLAN_SYSTEM_PROMPT),
+                SystemMessage.from(buildProfilePromptPrefix(state) + "\n\n" + PLAN_SYSTEM_PROMPT),
                 planUserMessage
         );
 
@@ -412,6 +413,29 @@ public class PlanNode implements NodeAction<DeepAgentState> {
     }
 
     /**
+     * 从 state 读取 activeProfile，返回其系统提示词作为前缀（Plan A 框架接入点）。
+     * profile 加载失败、state 缺失时返回空串，保留原有 PLAN_SYSTEM_PROMPT 行为兜底。
+     */
+    private String buildProfilePromptPrefix(DeepAgentState state) {
+        if (state == null) return "";
+        String activeProfileId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE).orElse(null);
+        if (activeProfileId == null || activeProfileId.isBlank()) return "";
+        try {
+            com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId);
+            String sessionId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.SESSION_ID).orElse(null);
+            String userInput = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.INSTRUCTIONS).orElse(null);
+            Long userId = state.<Long>value(com.hypersense.boot.framework.agents.model.DeepAgentState.USER_ID).orElse(null);
+            Long tenantId = state.<Long>value(com.hypersense.boot.framework.agents.model.DeepAgentState.TENANT_ID).orElse(null);
+            com.hypersense.boot.framework.agents.profile.ProfileContext ctx =
+                    new com.hypersense.boot.framework.agents.profile.ProfileContext(sessionId, userId, tenantId, userInput, null, java.util.Map.of());
+            return profile.systemPrompt(ctx);
+        } catch (Exception e) {
+            // Plan A 框架：profile 加载失败不阻塞主流程，降级走原 PLAN_SYSTEM_PROMPT
+            return "";
+        }
+    }
+
+    /**
      * 识别 DIRECT_REPLY: 前缀。匹配时返回去掉前缀的回复；否则返回 null。
      */
     private String parseDirectReply(String planText) {
@@ -499,7 +523,7 @@ public class PlanNode implements NodeAction<DeepAgentState> {
             // 重新调用 LLM（不带附件视觉，重试简化为纯文本以降低成本）
             try {
                 List<ChatMessage> retryMessages = List.of(
-                        SystemMessage.from(PLAN_SYSTEM_PROMPT),
+                        SystemMessage.from(buildProfilePromptPrefix(state) + "\n\n" + PLAN_SYSTEM_PROMPT),
                         UserMessage.from(retryPrompt)
                 );
                 ChatResponse retryResp = chatModel.chat(retryMessages);
