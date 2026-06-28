@@ -357,6 +357,23 @@
         </dependency>
         -->
 
+        <!-- ==================== Plan B Design Profile 工具依赖 ==================== -->
+
+        <!-- Jsoup HTML 解析，用于反 slop lint 与 brand_color_drift 规则 -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.17.2</version>
+        </dependency>
+
+        <!-- MockWebServer，用于 design_asset_fetch HTTP mock 测试 -->
+        <dependency>
+            <groupId>com.squareup.okhttp3</groupId>
+            <artifactId>mockwebserver</artifactId>
+            <version>4.12.0</version>
+            <scope>test</scope>
+        </dependency>
+
     </dependencies>
 
     <build>
