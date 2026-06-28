@@ -727,8 +727,10 @@ public class GodlikeAgent {
                             sandboxManager, null, null);
             // 非 Spring 构建路径：profileRegistry 传 null，PlanNode.buildProfilePromptPrefix / ExecuteNode.buildStrategyHint
             // 捕获 NPE 后返回空串，降级走原 PLAN_SYSTEM_PROMPT / EXECUTE_SYSTEM_PROMPT（独立 Builder 不接入 CapabilityProfile 框架）
+            // tddPhaseManager / symbolRegistry 同样传 null：onToolExecuted / applyTddPhase 内部 null 防御 + 仅 code profile 生效，
+            // 独立 Builder 不路由到 code profile，hook 实质空跑。
             PlanNode planNode = new PlanNode(model, disabledGate, defaultProps, attachmentCtx, null);
-            ExecuteNode executeNode = new ExecuteNode(model, disabledGate, attachmentCtx, null);
+            ExecuteNode executeNode = new ExecuteNode(model, disabledGate, attachmentCtx, null, null, null);
             DelegateNode delegateNode = new DelegateNode(model, tools, subAgentDefinitions, sandboxManager);
             ToolNode toolNode = ToolNode.create(tools, toolRetryConfig, model, streamingChatModel);
             FinalizeNode finalizeNode = new FinalizeNode(model, attachmentCtx);

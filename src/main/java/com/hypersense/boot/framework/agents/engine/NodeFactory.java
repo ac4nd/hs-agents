@@ -44,13 +44,16 @@ public class NodeFactory {
     private final SandboxManager sandboxManager;
     private final AttachmentContext attachmentContext;
     private final com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry;
+    private final com.hypersense.boot.framework.agents.profile.impl.TddPhaseManager tddPhaseManager;
+    private final com.hypersense.boot.framework.agents.profile.lint.SymbolRegistry symbolRegistry;
 
     public PlanNode planNode(ChatModel chatModel) {
         return new PlanNode(chatModel, hitlGateChecker, agentProperties, attachmentContext, profileRegistry);
     }
 
     public ExecuteNode executeNode(ChatModel chatModel) {
-        return new ExecuteNode(chatModel, hitlGateChecker, attachmentContext, profileRegistry);
+        return new ExecuteNode(chatModel, hitlGateChecker, attachmentContext, profileRegistry,
+                tddPhaseManager, symbolRegistry);
     }
 
     public FinalizeNode finalizeNode(ChatModel chatModel) {

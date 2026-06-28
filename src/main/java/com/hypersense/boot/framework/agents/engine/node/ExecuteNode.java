@@ -62,6 +62,8 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
     private final HitlGateChecker hitlGateChecker;
     private final AttachmentContext attachmentContext;
     private final com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry;
+    private final com.hypersense.boot.framework.agents.profile.impl.TddPhaseManager tddPhaseManager;
+    private final com.hypersense.boot.framework.agents.profile.lint.SymbolRegistry symbolRegistry;
 
     /**
      * 已废除的 direct 策略常量。
@@ -203,7 +205,25 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
                     decision.getSeverity(), decision.getReason());
         }
 
+        // 写入当前 TDD phase（仅 code profile 生效），供下游 ToolNode / 前端感知
+        applyTddPhase(state, result);
+
         return result;
+    }
+
+    /**
+     * 将当前 TDD phase 写入 state.CURRENT_PHASE（仅 code profile 生效）。
+     * <p>phase 不可用时静默跳过，不影响主流程。</p>
+     */
+    private void applyTddPhase(DeepAgentState state, Map<String, Object> result) {
+        String activeProfileId = state.<String>value(DeepAgentState.ACTIVE_PROFILE).orElse(null);
+        if (!"code".equals(activeProfileId)) return;
+        if (tddPhaseManager == null) return; // 非 Spring 路径未注入，静默跳过
+        String sessionId = state.<String>value(DeepAgentState.SESSION_ID).orElse("__default__");
+        try {
+            com.hypersense.boot.framework.agents.profile.impl.TddPhase phase = tddPhaseManager.current(sessionId);
+            result.put(DeepAgentState.CURRENT_PHASE, phase.name());
+        } catch (Exception ignore) { /* 静默 */ }
     }
 
     /**
@@ -259,7 +279,16 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
             com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId);
             return switch (profile.planStrategy()) {
                 case OUTLINE_DEMO -> "\n【拆分策略】先输出 outline + 1 个 demo 项，待用户审批后再批量输出剩余 TODO。\n";
-                case TDD -> "\n【拆分策略】TODO 顺序：(1) file_read 相关代码 (2) file_write 失败测试 (3) 等待用户审批测试方向 (4) file_write 实现 (5) sandbox_exec 测试 (6) lint。\n";
+                case TDD -> {
+                    StringBuilder sb = new StringBuilder("\n【拆分策略】TODO 顺序：(1) file_read 相关代码 (2) file_write 失败测试 (3) 等待用户审批测试方向 (4) file_write 实现 (5) sandbox_exec 测试 (6) lint。\n");
+                    String sessionId = state.<String>value(DeepAgentState.SESSION_ID).orElse("__default__");
+                    try {
+                        com.hypersense.boot.framework.agents.profile.impl.TddPhase cur = tddPhaseManager.current(sessionId);
+                        sb.append("当前 TDD 阶段：").append(cur.description())
+                          .append("。本批 TODO 必须仅服务此阶段（不要跨阶段产出）。\n");
+                    } catch (Exception ignore) { /* phase 不可用时静默，hint 仍有效 */ }
+                    yield sb.toString();
+                }
                 case DIVERGE_THEN_STRUCTURE -> "\n【拆分策略】TODO 顺序：(1) 多轮 internet_search/web_reader 调研 (2) 收敛结论 (3) 推导 SMART 任务 (4) HITL 审批。\n";
                 case OUTLINE_THEN_FILL -> "\n【拆分策略】TODO 顺序：(1) 输出文档 outline (2) 逐板块撰写。\n";
                 case LAYERED_LEARNING -> "\n【拆分策略】TODO 顺序：(1) 评估用户水平 (2) 制定学习路径 (3) 由浅入深配示例。\n";
@@ -294,5 +323,91 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
                 .timestamp(System.currentTimeMillis())
                 .build();
         consumer.accept(event);
+    }
+
+    /**
+     * 工具执行后回调（由 ToolNode 在工具执行完后调用，Task 13 接入）。
+     * <p>仅 code profile 生效。根据 toolName 推进 TddPhase 状态机：
+     * <ul>
+     *   <li>file_write → READ→TEST / TEST→TEST_HITL / IMPL→EXEC，并抽取源码 import 注册到 SymbolRegistry</li>
+     *   <li>sandbox_exec → EXEC→LINT</li>
+     * </ul>
+     * </p>
+     * <p>失败（如非法状态迁移）静默吞掉 + log.warn，不阻塞主流程。</p>
+     *
+     * @param state       当前 agent state（读 ACTIVE_PROFILE / SESSION_ID）
+     * @param toolName    工具名（file_write / sandbox_exec 等）
+     * @param toolResult  工具结果 Map（含写盘内容等；可空）
+     */
+    public void onToolExecuted(DeepAgentState state, String toolName, Map<String, Object> toolResult) {
+        if (state == null || toolName == null) return;
+        String activeProfileId = state.<String>value(DeepAgentState.ACTIVE_PROFILE).orElse(null);
+        if (!"code".equals(activeProfileId)) return;
+        if (tddPhaseManager == null) return; // 非 Spring 路径未注入，静默跳过
+        String sessionId = state.<String>value(DeepAgentState.SESSION_ID).orElse("__default__");
+
+        try {
+            com.hypersense.boot.framework.agents.profile.impl.TddPhase cur = tddPhaseManager.current(sessionId);
+            if ("file_write".equals(toolName)) {
+                switch (cur) {
+                    case READ -> tddPhaseManager.transition(sessionId, com.hypersense.boot.framework.agents.profile.impl.TddPhase.TEST);
+                    case TEST -> tddPhaseManager.transition(sessionId, com.hypersense.boot.framework.agents.profile.impl.TddPhase.TEST_HITL);
+                    case IMPL -> tddPhaseManager.transition(sessionId, com.hypersense.boot.framework.agents.profile.impl.TddPhase.EXEC);
+                    default -> { /* 其他阶段不因 file_write 推进 */ }
+                }
+                registerImportsFromCode(extractFileContent(toolResult), sessionId);
+            } else if ("sandbox_exec".equals(toolName)) {
+                if (cur == com.hypersense.boot.framework.agents.profile.impl.TddPhase.EXEC) {
+                    tddPhaseManager.transition(sessionId, com.hypersense.boot.framework.agents.profile.impl.TddPhase.LINT);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("ExecuteNode.onToolExecuted: 推进 TDD 阶段失败 tool={}, session={}, err={}",
+                    toolName, sessionId, e.getMessage());
+        }
+    }
+
+    /** 从工具结果 Map 中提取写盘内容（FileWriteTool 的产物）。无则返回 null。 */
+    private String extractFileContent(Map<String, Object> toolResult) {
+        if (toolResult == null) return null;
+        Object content = toolResult.get("content");
+        if (content == null) content = toolResult.get("text");
+        return content == null ? null : content.toString();
+    }
+
+    /**
+     * 抽取源码 import 并注册到 SymbolRegistry（防 LLM 用 package_lookup 之外的 API）。
+     * <ul>
+     *   <li>Python：from X import Y / import X.Y → 注册 Y 或末段</li>
+     *   <li>JS：import { Y } from 'X' → 注册每个 Y（含 as alias 处理）</li>
+     * </ul>
+     */
+    private void registerImportsFromCode(String code, String sessionId) {
+        if (code == null || code.isBlank()) return;
+        // Python
+        java.util.regex.Pattern pyImport = java.util.regex.Pattern.compile(
+                "(?m)^\\s*(?:from\\s+([\\w.]+)\\s+import\\s+(\\w+)|import\\s+([\\w.]+))\\s*$");
+        java.util.regex.Matcher m = pyImport.matcher(code);
+        while (m.find()) {
+            if (m.group(2) != null && !m.group(2).isEmpty()) {
+                symbolRegistry.register(sessionId, m.group(2));
+            }
+            if (m.group(3) != null && !m.group(3).isEmpty()) {
+                String[] parts = m.group(3).split("\\.");
+                if (parts.length > 1) {
+                    symbolRegistry.register(sessionId, parts[parts.length - 1]);
+                }
+            }
+        }
+        // JS
+        java.util.regex.Pattern jsImport = java.util.regex.Pattern.compile(
+                "import\\s+[^;]*?\\{([^}]+)\\}\\s*from\\s+['\"][^'\"]+['\"]");
+        java.util.regex.Matcher jm = jsImport.matcher(code);
+        while (jm.find()) {
+            for (String s : jm.group(1).split(",")) {
+                String sym = s.trim().split("\\s+as\\s+")[0].trim();
+                if (!sym.isEmpty()) symbolRegistry.register(sessionId, sym);
+            }
+        }
     }
 }
