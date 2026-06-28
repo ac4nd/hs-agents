@@ -57,10 +57,22 @@ public class AgentProfileService {
         PlanStrategy strategy = PlanStrategy.fromString(entity.getPlanStrategy());
 
         return switch (id) {
-            case "design" -> new StubDesignProfile(id, name, template, tools, strategy, outputFormat, policy);
+            case "design" -> com.hypersense.boot.framework.agents.profile.impl.DesignProfile.withBrandColor(
+                    resolveBrandPrimary(outputFormat), template, tools, outputFormat, policy);
             case "code" -> new StubCodeProfile(id, name, template, tools, strategy, outputFormat, policy);
             default -> new GenericProfile(id, name, template, tools, strategy, outputFormat, policy);
         };
+    }
+
+    /** 从 outputFormat 或 entity 字段提取 design system 主色；无则返回 null 跳过 brand_color_drift */
+    private String resolveBrandPrimary(JsonNode outputFormat) {
+        if (outputFormat == null || outputFormat.isMissingNode() || outputFormat.isNull()) return null;
+        JsonNode ds = outputFormat.path("properties").path("meta").path("properties").path("designSystem");
+        if (ds.isMissingNode()) {
+            ds = outputFormat.path("designSystem");
+        }
+        JsonNode primary = ds.path("primary");
+        return primary.isTextual() ? primary.asText() : null;
     }
 
     private List<String> parseStringList(JsonNode node) {
