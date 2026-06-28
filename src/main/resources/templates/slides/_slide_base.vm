@@ -1,0 +1,42 @@
+## src/main/resources/templates/slides/_slide_base.vm
+## 用法：#parse("templates/slides/_slide_base.vm")，需先 $body.setContent("...")
+#set($brand = $designSystem.primary)
+#set($accent = $designSystem.accent)
+#set($font = $designSystem.font)
+#if(!$font || $font == "")#set($font = "'Source Serif', serif")#end
+#if(!$brand || $brand == "")#set($brand = "#07c160")#end
+#if(!$accent || $accent == "")#set($accent = "#F97316")#end
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<title>$title</title>
+<style>
+  :root {
+    --brand: $brand;
+    --accent: $accent;
+    --font-display: $font;
+    --font-body: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: var(--font-body); background: #ffffff; color: #1a1a1a; }
+  .slide {
+    width: 1920px;
+    height: 1080px;
+    padding: 96px 120px;
+    position: relative;
+    overflow: hidden;
+  }
+  .display { font-family: var(--font-display); }
+  .accent-bar {
+    width: 64px; height: 4px; background: var(--accent);
+    margin-bottom: 32px; border-radius: 2px;
+  }
+</style>
+</head>
+<body>
+<div class="slide">
+$body
+</div>
+</body>
+</html>

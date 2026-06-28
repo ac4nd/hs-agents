@@ -1,0 +1,30 @@
+## src/main/resources/templates/slides/ppt_weekly_update.vm
+## 周报风格：顶部品牌色 hero + 下方信息网格
+#set($body = "")
+#foreach($slide in $slides)
+#set($layout = $slide.layout)
+#if($layout == "center_stage")
+#set($body = "${body}<div class='hero' style='display:flex;flex-direction:column;justify-content:center;height:100%;'>
+  <div class='accent-bar'></div>
+  <h1 class='display' style='font-size:96px;line-height:1.1;margin-bottom:24px;color:var(--brand);'>$!slide.content.headline</h1>
+  <p style='font-size:32px;color:#4a4a4a;'>$!slide.content.subhead</p>
+</div>")
+#elseif($layout == "fixture_grid")
+#set($rows = "")
+#foreach($m in $slide.content.matches)
+#set($rows = "${rows}<tr><td style='padding:16px 24px;font-size:28px;'>$m.home vs $m.away</td><td style='padding:16px 24px;color:var(--accent);font-family:monospace;'>$m.time</td></tr>")
+#end
+#set($body = "${body}<div>
+  <div class='accent-bar'></div>
+  <h2 class='display' style='font-size:64px;margin-bottom:48px;'>$!slide.content.title</h2>
+  <table style='border-collapse:collapse;width:100%;'>$rows</table>
+</div>")
+#else
+#set($body = "${body}<div>
+  <div class='accent-bar'></div>
+  <h2 class='display' style='font-size:64px;margin-bottom:32px;'>$!slide.content.title</h2>
+  <p style='font-size:28px;line-height:1.6;'>$!slide.content.body</p>
+</div>")
+#end
+#end
+#parse("templates/slides/_slide_base.vm")
