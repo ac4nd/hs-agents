@@ -1,0 +1,23 @@
+## src/main/resources/templates/slides/ppt_keynote.vm
+## Keynote 风格：单页一句金句、超大字号、留白克制
+#set($body = "")
+#foreach($slide in $slides)
+#set($layout = $slide.layout)
+#if($layout == "hero")
+#set($body = "${body}<div style='display:flex;align-items:center;justify-content:center;height:100%;'>
+  <h1 class='display' style='font-size:160px;line-height:1.05;color:var(--brand);text-align:center;'>$!slide.content.headline</h1>
+</div>")
+#elseif($layout == "quote")
+#set($body = "${body}<div style='display:flex;flex-direction:column;justify-content:center;height:100%;padding-left:80px;'>
+  <p style='font-family:var(--font-display);font-size:80px;line-height:1.2;color:#1a1a1a;font-style:italic;'>「$!slide.content.quote」</p>
+  <p style='font-size:32px;color:var(--accent);margin-top:48px;'>— $!slide.content.author</p>
+</div>")
+#else
+#set($body = "${body}<div style='display:flex;flex-direction:column;justify-content:center;height:100%;'>
+  <div class='accent-bar' style='margin-bottom:48px;'></div>
+  <h2 class='display' style='font-size:120px;line-height:1.05;'>$!slide.content.title</h2>
+  <p style='font-size:32px;color:#6a6a6a;margin-top:32px;'>$!slide.content.subhead</p>
+</div>")
+#end
+#end
+#parse("templates/slides/_slide_base.vm")

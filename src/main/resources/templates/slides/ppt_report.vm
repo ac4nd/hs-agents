@@ -1,0 +1,41 @@
+## src/main/resources/templates/slides/ppt_report.vm
+## 报告风格：标题 + 关键数字 + 图表占位
+#set($body = "")
+#foreach($slide in $slides)
+#set($layout = $slide.layout)
+#if($layout == "kpi")
+#set($kpis = "")
+#foreach($k in $slide.content.metrics)
+#set($kpis = "${kpis}<div style='flex:1;padding:48px;background:#f7f7f5;border-radius:12px;'>
+  <div style='font-family:var(--font-display);font-size:96px;color:var(--brand);line-height:1;'>$k.value</div>
+  <div style='font-size:24px;color:#6a6a6a;margin-top:16px;'>$k.label</div>
+</div>")
+#end
+#set($body = "${body}<div style='display:flex;flex-direction:column;height:100%;'>
+  <div class='accent-bar'></div>
+  <h2 class='display' style='font-size:56px;margin-bottom:48px;'>$!slide.content.title</h2>
+  <div style='display:flex;gap:32px;flex:1;'>$kpis</div>
+</div>")
+#elseif($layout == "table")
+#set($rows = "")
+#foreach($r in $slide.content.rows)
+#set($cells = "")
+#foreach($c in $r.cells)
+#set($cells = "${cells}<td style='padding:12px 16px;border-bottom:1px solid #e5e5e5;font-size:22px;'>$c</td>")
+#end
+#set($rows = "${rows}<tr>$cells</tr>")
+#end
+#set($body = "${body}<div>
+  <div class='accent-bar'></div>
+  <h2 class='display' style='font-size:48px;margin-bottom:32px;'>$!slide.content.title</h2>
+  <table style='width:100%;border-collapse:collapse;'>$rows</table>
+</div>")
+#else
+#set($body = "${body}<div>
+  <div class='accent-bar'></div>
+  <h2 class='display' style='font-size:64px;margin-bottom:32px;'>$!slide.content.title</h2>
+  <p style='font-size:28px;line-height:1.6;color:#3a3a3a;'>$!slide.content.body</p>
+</div>")
+#end
+#end
+#parse("templates/slides/_slide_base.vm")
