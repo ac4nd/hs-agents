@@ -5,6 +5,7 @@ import com.hypersense.boot.framework.agents.tool.ToolProvider;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.model.chat.request.json.JsonObjectSchema;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
@@ -66,7 +67,9 @@ public class PackageLookupTool implements ToolProvider {
 
     /**
      * 生产构造：SymbolRegistry 由 Spring 注入，RestClient 用默认实例，三个 base 走公网默认。
+     * <p>多构造函数场景下 Spring 无法推断使用哪个，必须用 {@link Autowired} 显式指定此为装配入口。</p>
      */
+    @Autowired
     public PackageLookupTool(SymbolRegistry registry) {
         this(registry, RestClient.create(),
                 DEFAULT_PYPI_API, DEFAULT_NPM_API, DEFAULT_MAVEN_API);
