@@ -23,7 +23,9 @@ class AgentProfileServiceDesignBranchTest {
     @BeforeEach
     void setUp() {
         mapper = Mockito.mock(AgentProfileMapper.class);
-        service = new AgentProfileService(mapper);
+        service = new AgentProfileService(mapper,
+                new com.hypersense.boot.framework.agents.profile.lint.SymbolRegistry(),
+                Mockito.mock(com.hypersense.boot.framework.agents.tool.SandboxExecutor.class));
     }
 
     @Test

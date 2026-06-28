@@ -5,9 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hypersense.boot.framework.agents.mapper.AgentProfileMapper;
 import com.hypersense.boot.framework.agents.model.AgentProfileEntity;
 import com.hypersense.boot.framework.agents.profile.*;
+import com.hypersense.boot.framework.agents.profile.impl.CodeProfile;
 import com.hypersense.boot.framework.agents.profile.impl.DesignProfile;
 import com.hypersense.boot.framework.agents.profile.impl.GenericProfile;
-import com.hypersense.boot.framework.agents.profile.impl.StubCodeProfile;
+import com.hypersense.boot.framework.agents.profile.lint.SymbolRegistry;
+import com.hypersense.boot.framework.agents.tool.SandboxExecutor;
 import com.hypersense.boot.common.annotation.IgnoreTenant;
 import org.springframework.stereotype.Service;
 
@@ -28,26 +30,43 @@ public class AgentProfileService {
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final AgentProfileMapper mapper;
+    private final SymbolRegistry symbolRegistry;
+    private final SandboxExecutor sandbox;
 
-    public AgentProfileService(AgentProfileMapper mapper) {
+    public AgentProfileService(AgentProfileMapper mapper,
+                               SymbolRegistry symbolRegistry,
+                               SandboxExecutor sandbox) {
         this.mapper = mapper;
+        this.symbolRegistry = symbolRegistry;
+        this.sandbox = sandbox;
     }
 
     /**
-     * 按 profileId 加载实体并包装为 CapabilityProfile。
+     * 按 profileId 加载实体并包装为 CapabilityProfile（sessionId 为 null）。
+     * CapabilityProfileRegistry 依赖此 1-arg 签名。
      * @throws ProfileNotFoundException 当 profileId 不存在或被禁用
      */
     @IgnoreTenant
     public CapabilityProfile loadProfile(String profileId) {
+        return loadProfile(profileId, null);
+    }
+
+    /**
+     * 按 profileId + sessionId 加载实体并包装为 CapabilityProfile。
+     * sessionId 用于 CodeProfile 的 no_phantom_api lint（隔离 session 级符号缓存）。
+     * @throws ProfileNotFoundException 当 profileId 不存在或被禁用
+     */
+    @IgnoreTenant
+    public CapabilityProfile loadProfile(String profileId, String sessionId) {
         AgentProfileEntity entity = mapper.findEnabledByProfileId(profileId);
         if (entity == null) {
             throw new ProfileNotFoundException(profileId);
         }
-        return buildProfile(entity);
+        return buildProfile(entity, sessionId);
     }
 
     @IgnoreTenant
-    private CapabilityProfile buildProfile(AgentProfileEntity entity) {
+    private CapabilityProfile buildProfile(AgentProfileEntity entity, String sessionId) {
         List<String> tools = parseStringList(entity.getAllowedTools());
         HitlPolicy policy = parseHitlPolicy(entity.getHitlPolicy());
         String template = entity.getSystemPrompt();
@@ -59,7 +78,11 @@ public class AgentProfileService {
         return switch (id) {
             case "design" -> DesignProfile.withBrandColor(
                     resolveBrandPrimary(outputFormat), template, tools, outputFormat, policy);
-            case "code" -> new StubCodeProfile(id, name, template, tools, strategy, outputFormat, policy);
+            // TODO(task 11): language/sourceFile/testFile 当前为临时占位，应从 DeepAgentState 读取真实值。
+            case "code" -> CodeProfile.withRuntimeContext(
+                    sandbox, symbolRegistry, sessionId == null ? "__default__" : sessionId,
+                    "python", "src/main.py", "test/test_main.py",
+                    template, tools, outputFormat, policy);
             default -> new GenericProfile(id, name, template, tools, strategy, outputFormat, policy);
         };
     }
