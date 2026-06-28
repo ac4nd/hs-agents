@@ -48,4 +48,9 @@ public abstract class AbstractCapabilityProfile implements CapabilityProfile {
         if (ctx.userId() != null) prompt = prompt.replace("{{userId}}", String.valueOf(ctx.userId()));
         return prompt;
     }
+
+    /** 同包/子类访问 systemPromptTemplate 私有字段（DesignProfile 复制构造用） */
+    protected String getSystemPromptTemplate() {
+        return systemPromptTemplate;
+    }
 }
