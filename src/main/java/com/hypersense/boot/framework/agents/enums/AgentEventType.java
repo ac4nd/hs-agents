@@ -59,7 +59,9 @@ public enum AgentEventType {
     /** 审批已接收 */
     APPROVAL_RECEIVED("approval_received"),
     /** 等待审批中 */
-    AWAITING_APPROVAL("awaiting_approval");
+    AWAITING_APPROVAL("awaiting_approval"),
+    /** Profile 串联：上游 Profile 完成后切换到下游 Profile 时发送（Plan A 新增） */
+    PROFILE_HANDOFF("profile_handoff");
 
     private final String value;
 
