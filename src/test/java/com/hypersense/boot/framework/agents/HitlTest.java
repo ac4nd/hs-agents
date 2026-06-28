@@ -78,7 +78,7 @@ class HitlTest {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
 
         TaskExecutor taskExecutor = Runnable::run;
-        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class));
+        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class), mock(com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode.class));
 
         securityUtilsMock = mockStatic(SecurityUtils.class);
         securityUtilsMock.when(SecurityUtils::getUserId).thenReturn(MOCK_USER_ID);

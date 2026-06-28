@@ -89,6 +89,9 @@ public class AgentServiceImpl implements AgentService {
     /** 会话-项目绑定 DB 服务（落库 sessionId ↔ projectId/title 关联） */
     private final AgentSessionService agentSessionService;
 
+    /** 意图分类节点：在 streamExecute 入口单次调用，识别主能力档位（Plan A Capability Profile） */
+    private final com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode intentClassifierNode;
+
     /** 编译图缓存：sessionId → CompiledGraph（Caffeine 自动过期，避免内存泄漏） */
     private final Cache<String, CompiledGraph<DeepAgentState>> graphCache;
 
@@ -107,7 +110,8 @@ public class AgentServiceImpl implements AgentService {
                             com.hypersense.boot.system.service.LlmApiKeyConfigService llmApiKeyConfigService,
                             com.hypersense.boot.system.service.LlmVendorConfigService llmVendorConfigService,
                             com.hypersense.boot.system.service.DesignSystemConfigService designSystemConfigService,
-                            AgentSessionService agentSessionService) {
+                            AgentSessionService agentSessionService,
+                            com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode intentClassifierNode) {
         this.deepAgentGraph = deepAgentGraph;
         this.agentProperties = agentProperties;
         this.redisTemplate = redisTemplate;
@@ -121,6 +125,7 @@ public class AgentServiceImpl implements AgentService {
         this.llmVendorConfigService = llmVendorConfigService;
         this.designSystemConfigService = designSystemConfigService;
         this.agentSessionService = agentSessionService;
+        this.intentClassifierNode = intentClassifierNode;
         this.graphCache = Caffeine.newBuilder()
                 .expireAfterAccess(agentProperties.getDeep().getSessionTtl(), TimeUnit.SECONDS)
                 .maximumSize(100)
@@ -385,7 +390,28 @@ public class AgentServiceImpl implements AgentService {
             boolean historyAppended = false; // 防止正常路径与 finally 重复追加
 
             try {
+                // === Capability Profile 意图分类（Plan A 新增） ===
+                // 在 buildInitialState 之前单次调用 LLM 分类器，识别用户主能力档位。
+                // 失败降级为 code-profile（最通用）+ confidence=0.3，保证后续流程不中断。
+                com.hypersense.boot.framework.agents.profile.IntentClassification intent;
+                try {
+                    intent = intentClassifierNode.classify(effectiveInput, sessionId);
+                    log.info("IntentClassifier 结果: sessionId={}, primary={}, secondary={}, confidence={}",
+                            sessionId, intent.primary(), intent.safeSecondary(), intent.confidence());
+                } catch (Exception e) {
+                    log.warn("IntentClassifier 异常，降级为 code-profile", e);
+                    intent = new com.hypersense.boot.framework.agents.profile.IntentClassification(
+                            "code", java.util.List.of(), 0.3, "异常降级", java.util.Map.of());
+                }
+
                 Map<String, Object> initialState = buildInitialState(sessionId, effectiveInput, session.getEnabledTools(), session.getHistorySummary(), session.getHistory(), currentUserId, currentTenantId, attachmentPaths, designSystemId, designSystemType, designSystemEnabled);
+
+                // 将意图分类结果写入 initialState，供 PlanNode/ExecuteNode 读取
+                initialState.put(com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE, intent.primary());
+                initialState.put(com.hypersense.boot.framework.agents.model.DeepAgentState.INTENT_CONFIDENCE, intent.confidence());
+                initialState.put(com.hypersense.boot.framework.agents.model.DeepAgentState.SECONDARY_PROFILES, intent.safeSecondary());
+                initialState.put(com.hypersense.boot.framework.agents.model.DeepAgentState.PROFILE_HINTS,
+                        intent.profileHints() == null ? java.util.Map.of() : intent.profileHints());
                 // INFO 级别诊断：验证多轮上下文是否正确加载（用户报告"找不到历史内容"问题排查）
                 int histSize = session.getHistory() == null ? 0 : session.getHistory().size();
                 boolean hasSummary = session.getHistorySummary() != null && !session.getHistorySummary().isBlank();

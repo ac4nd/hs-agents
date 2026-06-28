@@ -64,7 +64,7 @@ class AgentServiceImplTest {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
 
         TaskExecutor taskExecutor = Runnable::run; // 同步执行器（测试用）
-        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class));
+        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class), mock(com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode.class));
 
         // Mock SecurityUtils.getUserId() 静态方法
         securityUtilsMock = mockStatic(SecurityUtils.class);
