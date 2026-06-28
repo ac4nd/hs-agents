@@ -67,6 +67,6 @@ public class NodeFactory {
      */
     public ToolNode toolNode(ChatModel chatModel, @Nullable StreamingChatModel streamingChatModel) {
         ToolRetryConfig retryConfig = ToolRetryConfig.fromProperties(agentProperties.getTools().getToolRetry());
-        return ToolNode.create(toolProviders, retryConfig, chatModel, streamingChatModel);
+        return ToolNode.create(toolProviders, retryConfig, chatModel, streamingChatModel, profileRegistry);
     }
 }

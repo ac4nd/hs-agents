@@ -67,14 +67,24 @@ public class ToolNode implements NodeAction<DeepAgentState> {
      * <p>注入后 {@link #decideByLlm} 会优先走流式分支，避免同步 8K+ token 整体超时。</p>
      */
     private final dev.langchain4j.model.chat.StreamingChatModel streamingChatModel;
+    /**
+     * Capability Profile 注册表：用于在 active_profile 已设置时，对 LLM 请求的工具进行白名单校验。
+     * <p>
+     * Plan A 框架：仅当 {@link DeepAgentState#ACTIVE_PROFILE} 在 state 中已设置且能成功加载 profile 时，
+     * 才启用白名单校验；否则（profile 未设置 / 加载失败）降级为「不限制」，保留原有行为。
+     * 测试与不通过 Spring 创建的实例可传入 null。
+     * </p>
+     */
+    private final com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry;
 
     @Autowired
     public ToolNode(@Nullable List<ToolProvider> toolProviders,
                     @Nullable AgentProperties agentProperties,
-                    @Nullable ChatModel chatModel) {
+                    @Nullable ChatModel chatModel,
+                    @Nullable com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry) {
         this(toolProviders,
                 resolveRetryConfig(agentProperties),
-                chatModel, null);
+                chatModel, null, profileRegistry);
     }
 
     /** 旧签名兼容：Spring 自动注入时如未显式注入 ChatModel 仍可工作（走旧遍历逻辑）。 */
@@ -82,7 +92,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                     @Nullable AgentProperties agentProperties) {
         this(toolProviders,
                 resolveRetryConfig(agentProperties),
-                null, null);
+                null, null, null);
     }
 
     /**
@@ -90,7 +100,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
      * 旧二参版本，保留以兼容既有调用方（如 ToolRetryTest）。
      */
     public static ToolNode create(List<ToolProvider> toolProviders, ToolRetryConfig retryConfig) {
-        return new ToolNode(toolProviders, retryConfig != null ? retryConfig : ToolRetryConfig.disabled(), null, null);
+        return new ToolNode(toolProviders, retryConfig != null ? retryConfig : ToolRetryConfig.disabled(), null, null, null);
     }
 
     /**
@@ -99,7 +109,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
     public static ToolNode create(List<ToolProvider> toolProviders, ToolRetryConfig retryConfig, ChatModel chatModel) {
         return new ToolNode(toolProviders,
                 retryConfig != null ? retryConfig : ToolRetryConfig.disabled(),
-                chatModel, null);
+                chatModel, null, null);
     }
 
     /**
@@ -111,15 +121,30 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                                   dev.langchain4j.model.chat.StreamingChatModel streamingChatModel) {
         return new ToolNode(toolProviders,
                 retryConfig != null ? retryConfig : ToolRetryConfig.disabled(),
-                chatModel, streamingChatModel);
+                chatModel, streamingChatModel, null);
+    }
+
+    /**
+     * Builder 路径（含 profileRegistry）：用于 Plan A 主链路，使 ToolNode 能进行 profile 工具白名单校验。
+     * <p>主链路 NodeFactory / GodlikeAgent 应使用此重载注入 registry。</p>
+     */
+    public static ToolNode create(List<ToolProvider> toolProviders, ToolRetryConfig retryConfig,
+                                  ChatModel chatModel,
+                                  dev.langchain4j.model.chat.StreamingChatModel streamingChatModel,
+                                  com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry) {
+        return new ToolNode(toolProviders,
+                retryConfig != null ? retryConfig : ToolRetryConfig.disabled(),
+                chatModel, streamingChatModel, profileRegistry);
     }
 
     private ToolNode(List<ToolProvider> toolProviders, ToolRetryConfig retryConfig, ChatModel chatModel,
-                     dev.langchain4j.model.chat.StreamingChatModel streamingChatModel) {
+                     dev.langchain4j.model.chat.StreamingChatModel streamingChatModel,
+                     com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry) {
         this.toolProviders = toolProviders;
         this.retryConfig = retryConfig;
         this.chatModel = chatModel;
         this.streamingChatModel = streamingChatModel;
+        this.profileRegistry = profileRegistry;
     }
 
     private static ToolRetryConfig resolveRetryConfig(AgentProperties props) {
@@ -127,6 +152,58 @@ public class ToolNode implements NodeAction<DeepAgentState> {
             return ToolRetryConfig.disabled();
         }
         return ToolRetryConfig.fromProperties(props.getTools().getToolRetry());
+    }
+
+    /**
+     * 返回当前 active profile 的工具白名单。profile 未设置 / registry 未注入 / 加载失败时返回 null（表示不限制）。
+     * <p>
+     * Plan A 框架：仅在 active_profile 已设置且加载成功时启用白名单校验。
+     * 这样在 HITL 切换过渡、profile 未配置、或 registry 不可用（测试场景）时，
+     * ToolNode 完全保留原有行为，不引入额外限制。
+     * </p>
+     *
+     * @param state 当前 Agent 状态
+     * @return 允许的工具名列表；null 表示不应用白名单
+     */
+    private java.util.List<String> getActiveAllowedTools(DeepAgentState state) {
+        if (state == null || profileRegistry == null) return null;
+        String activeProfileId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE).orElse(null);
+        if (activeProfileId == null || activeProfileId.isBlank()) return null;
+        try {
+            com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId);
+            if (profile == null) return null;
+            return profile.allowedTools();
+        } catch (Exception e) {
+            // profile 加载失败：不阻塞主链路，降级为不限制（保留原行为）
+            log.warn("ToolNode: 加载 active profile [{}] 失败，跳过工具白名单校验: {}", activeProfileId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 校验 LLM 请求的工具是否在 active profile 的白名单内。
+     * <p>非白名单时返回带 failReason 的 outcome；白名单通过或未启用校验时返回 null。</p>
+     *
+     * @param requestedToolName LLM 通过 function-call 请求的工具名
+     * @param state             当前 Agent 状态
+     * @return 拒绝结果 outcome，或 null 表示允许继续
+     */
+    private LlmDecisionOutcome rejectIfNotInProfile(String requestedToolName, DeepAgentState state) {
+        java.util.List<String> allowed = getActiveAllowedTools(state);
+        if (allowed == null || allowed.isEmpty()) {
+            // 未启用白名单（profile 未设置 / 加载失败 / registry 未注入）：放行
+            return null;
+        }
+        if (allowed.contains(requestedToolName)) {
+            return null;  // 命中白名单，放行
+        }
+        // 不在白名单：构造与「LLM 调用了未注册的工具」一致风格的 failReason
+        String activeProfileId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE).orElse("unknown");
+        LlmDecisionOutcome o = new LlmDecisionOutcome();
+        o.failReason = "工具 " + requestedToolName + " 不属于当前 profile ["
+                + activeProfileId + "] 的 allowedTools 白名单，允许的工具：" + allowed;
+        log.warn("ToolNode: LLM 请求的工具 [{}] 被 profile [{}] 白名单拒绝", requestedToolName, activeProfileId);
+        return o;
     }
 
     @Override
@@ -443,6 +520,11 @@ public class ToolNode implements NodeAction<DeepAgentState> {
 
             ToolExecutionRequest req2 = ai.toolExecutionRequests().get(0);
             String reqName = req2.name();
+            // Plan A：在工具选择前先校验 active profile 的 allowedTools 白名单（流式路径）
+            LlmDecisionOutcome profileReject = rejectIfNotInProfile(reqName, state);
+            if (profileReject != null) {
+                return profileReject;
+            }
             Optional<ToolProvider> chosenOpt = candidates.stream()
                     .filter(t -> t.name().equals(reqName))
                     .findFirst();
@@ -596,6 +678,11 @@ public class ToolNode implements NodeAction<DeepAgentState> {
 
                 ToolExecutionRequest req = ai.toolExecutionRequests().get(0);
                 String reqName = req.name();
+                // Plan A：在工具选择前先校验 active profile 的 allowedTools 白名单（同步路径）
+                LlmDecisionOutcome profileReject = rejectIfNotInProfile(reqName, state);
+                if (profileReject != null) {
+                    return profileReject;
+                }
                 Optional<ToolProvider> chosenOpt = candidates.stream()
                         .filter(t -> t.name().equals(reqName))
                         .findFirst();
