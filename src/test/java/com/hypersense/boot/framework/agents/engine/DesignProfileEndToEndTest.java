@@ -3,7 +3,6 @@ package com.hypersense.boot.framework.agents.engine;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hypersense.boot.framework.agents.profile.*;
-import com.hypersense.boot.framework.agents.profile.impl.DesignProfile;
 import com.hypersense.boot.framework.agents.render.SlideTemplateEngine;
 import com.hypersense.boot.framework.agents.tool.impl.FileRenderTool;
 import org.junit.jupiter.api.Tag;
@@ -79,17 +78,23 @@ class DesignProfileEndToEndTest {
 
         List<String> files = (List<String>) result.get("files");
         assertTrue(files.contains("index.html"));
-        assertTrue(files.contains("deck.html"));
+        assertTrue(files.contains("slide_1.html"));
 
-        Path deck = tempDir.resolve("wc-test").resolve("deck.html");
-        String html = Files.readString(deck);
-        assertTrue(html.contains("2026 世界杯周报"));
-        assertTrue(html.contains("BRA"));
+        // 校验首页（cover）含世界杯标题；次页（fixtures）含 BRA
+        Path cover = tempDir.resolve("wc-test").resolve("slide_1.html");
+        String coverHtml = Files.readString(cover);
+        assertTrue(coverHtml.contains("2026 世界杯周报"));
+
+        Path fixtures = tempDir.resolve("wc-test").resolve("slide_2.html");
+        String fixturesHtml = Files.readString(fixtures);
+        assertTrue(fixturesHtml.contains("BRA"));
 
         CapabilityProfile profile = registry.get("design");
         for (LintRule rule : profile.lintRules()) {
-            String err = rule.check(html);
-            assertNull(err, "Lint 规则 " + rule.id() + " 不应失败：" + err);
+            String errCover = rule.check(coverHtml);
+            assertNull(errCover, "Lint 规则 " + rule.id() + " 不应失败(cover)：" + errCover);
+            String errFixtures = rule.check(fixturesHtml);
+            assertNull(errFixtures, "Lint 规则 " + rule.id() + " 不应失败(fixtures)：" + errFixtures);
         }
     }
 }
