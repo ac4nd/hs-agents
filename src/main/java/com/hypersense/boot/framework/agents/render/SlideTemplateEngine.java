@@ -66,7 +66,9 @@ public class SlideTemplateEngine {
     }
 
     private Map<String, Object> jsonNodeToMap(JsonNode node) {
-        if (node == null || node.isMissingNode()) return Map.of();
+        if (node == null || node.isMissingNode() || node.isNull()) return Map.of();
+        // 数组/标量无法转 Map，跳过避免 MismatchedInputException
+        if (!node.isObject()) return Map.of();
         return MAPPER.convertValue(node, Map.class);
     }
 
