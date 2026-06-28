@@ -51,7 +51,8 @@ public class SessionChunkBuffer {
             return;
         }
         Map<String, StringBuffer> sessionBuffers = buffers.get(sessionId);
-        if (sessionBuffers == null || !sessionBuffers.containsKey(filename)) {
+        StringBuffer sb = sessionBuffers == null ? null : sessionBuffers.get(filename);
+        if (sb == null) {
             throw new IllegalStateException(
                     "buffer not started for " + filename + " in session " + sessionId);
         }
@@ -59,7 +60,7 @@ public class SessionChunkBuffer {
             log.warn("file_write_chunk 单 chunk {} 字符超 {}，建议拆分",
                     chunk.length(), CHUNK_WARN_SIZE);
         }
-        sessionBuffers.get(filename).append(chunk);
+        sb.append(chunk);
     }
 
     /**
@@ -69,23 +70,24 @@ public class SessionChunkBuffer {
      */
     public String end(String sessionId, String filename) {
         Map<String, StringBuffer> sessionBuffers = buffers.get(sessionId);
-        if (sessionBuffers == null || !sessionBuffers.containsKey(filename)) {
+        StringBuffer sb = sessionBuffers == null ? null : sessionBuffers.remove(filename);
+        if (sb == null) {
             throw new IllegalStateException(
                     "buffer not started for " + filename + " in session " + sessionId);
         }
-        String content = sessionBuffers.remove(filename).toString();
         if (sessionBuffers.isEmpty()) {
             buffers.remove(sessionId);
         }
-        return content;
+        return sb.toString();
     }
 
     /**
      * 测试 / 监控辅助：返回当前 (sessionId, filename) 的累计字符数；不存在返回 -1。
      */
     public int bufferSize(String sessionId, String filename) {
-        Map<String, StringBuffer> sb = buffers.get(sessionId);
-        return sb == null || !sb.containsKey(filename) ? -1 : sb.get(filename).length();
+        Map<String, StringBuffer> sessionBuffers = buffers.get(sessionId);
+        StringBuffer sb = sessionBuffers == null ? null : sessionBuffers.get(filename);
+        return sb == null ? -1 : sb.length();
     }
 
     /**
