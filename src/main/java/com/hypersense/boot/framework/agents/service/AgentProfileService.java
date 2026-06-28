@@ -8,6 +8,7 @@ import com.hypersense.boot.framework.agents.profile.*;
 import com.hypersense.boot.framework.agents.profile.impl.GenericProfile;
 import com.hypersense.boot.framework.agents.profile.impl.StubCodeProfile;
 import com.hypersense.boot.framework.agents.profile.impl.StubDesignProfile;
+import com.hypersense.boot.common.annotation.IgnoreTenant;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -36,6 +37,7 @@ public class AgentProfileService {
      * 按 profileId 加载实体并包装为 CapabilityProfile。
      * @throws ProfileNotFoundException 当 profileId 不存在或被禁用
      */
+    @IgnoreTenant
     public CapabilityProfile loadProfile(String profileId) {
         AgentProfileEntity entity = mapper.findEnabledByProfileId(profileId);
         if (entity == null) {
@@ -44,6 +46,7 @@ public class AgentProfileService {
         return buildProfile(entity);
     }
 
+    @IgnoreTenant
     private CapabilityProfile buildProfile(AgentProfileEntity entity) {
         List<String> tools = parseStringList(entity.getAllowedTools());
         HitlPolicy policy = parseHitlPolicy(entity.getHitlPolicy());
