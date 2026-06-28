@@ -1,0 +1,171 @@
+## src/main/resources/templates/slides/deck_index.vm
+## 聚合页：含 3D 概览墙 + 键盘翻页 + 全屏演示模式
+## 参考实现：huashu-design/assets/deck_index.html
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<title>$title</title>
+<style>
+  :root {
+    --brand: $designSystem.primary;
+    --accent: $designSystem.accent;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", sans-serif;
+    background: #0a0a0a;
+    color: #fff;
+    overflow: hidden;
+  }
+  .deck-header {
+    position: fixed; top: 24px; left: 32px; z-index: 10;
+    display: flex; align-items: center; gap: 16px;
+  }
+  .deck-header h1 {
+    font-size: 18px; font-weight: 500;
+    color: rgba(255,255,255,0.85);
+  }
+  .deck-header .brand-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .overview-wall {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    perspective: 2000px;
+    transform-style: preserve-3d;
+  }
+  .overview-wall .card {
+    position: absolute;
+    width: 320px; height: 180px;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 8px;
+    backdrop-filter: blur(8px);
+    cursor: pointer;
+    transition: transform 0.3s, box-shadow 0.3s;
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'Source Serif', serif; font-size: 32px;
+  }
+  .overview-wall .card:hover {
+    transform: translateZ(40px) scale(1.05);
+    box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+    background: rgba(255,255,255,0.15);
+  }
+
+  .deck-stage {
+    position: fixed; inset: 0;
+    display: none;
+    background: #fff;
+  }
+  .deck-stage.active { display: block; }
+  .deck-stage iframe {
+    width: 100%; height: 100%; border: none;
+  }
+
+  .deck-controls {
+    position: fixed; bottom: 24px; left: 50%;
+    transform: translateX(-50%);
+    display: flex; gap: 16px; align-items: center;
+    background: rgba(0,0,0,0.6);
+    padding: 8px 20px; border-radius: 999px;
+    backdrop-filter: blur(8px);
+    font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  }
+  .deck-controls button {
+    background: none; border: none; color: rgba(255,255,255,0.8);
+    cursor: pointer; font-size: 18px; padding: 4px 8px;
+  }
+  .deck-counter {
+    color: var(--accent);
+    min-width: 60px; text-align: center;
+  }
+
+  .hint {
+    position: fixed; bottom: 72px; left: 50%;
+    transform: translateX(-50%);
+    font-size: 11px; color: rgba(255,255,255,0.5);
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.05em;
+  }
+</style>
+</head>
+<body>
+<div class="deck-header">
+  <div class="brand-dot"></div>
+  <h1>$title</h1>
+</div>
+
+<div class="overview-wall" id="wall">
+  #foreach($f in $slideFiles)
+  <div class="card" data-index="$foreach.index" onclick="openSlide($foreach.index)">
+    $foreach.index + 1
+  </div>
+  #end
+</div>
+
+<div class="deck-stage" id="stage">
+  <iframe id="frame" src=""></iframe>
+</div>
+
+<div class="deck-controls" id="controls" style="display:none;">
+  <button onclick="prev()">‹</button>
+  <span class="deck-counter"><span id="cur">0</span> / $slideFiles.size()</span>
+  <button onclick="next()">›</button>
+  <button onclick="closeSlide()" title="ESC 退出">✕</button>
+</div>
+
+<div class="hint" id="hint">点击任意卡片开始演示 · ← → 翻页 · ESC 返回概览</div>
+
+<script>
+  const slides = $slideFiles; // Velocity 渲染为 JSON 数组
+  let current = -1;
+  const wall = document.getElementById('wall');
+  const stage = document.getElementById('stage');
+  const frame = document.getElementById('frame');
+  const controls = document.getElementById('controls');
+  const hint = document.getElementById('hint');
+  const cur = document.getElementById('cur');
+
+  // 3D 概览墙布局：环形铺开
+  const cards = wall.querySelectorAll('.card');
+  const N = cards.length;
+  cards.forEach((c, i) => {
+    const angle = (i / N) * 2 * Math.PI;
+    const radius = Math.max(400, N * 50);
+    const x = Math.sin(angle) * radius;
+    const z = Math.cos(angle) * radius - radius;
+    c.style.transform = `translate3d(${x}px, 0, ${z}px) rotateY(${-angle * 180 / Math.PI}deg)`;
+  });
+
+  function openSlide(i) {
+    current = i;
+    frame.src = slides[i];
+    stage.classList.add('active');
+    wall.style.display = 'none';
+    controls.style.display = 'flex';
+    hint.style.display = 'none';
+    cur.textContent = i + 1;
+  }
+  function closeSlide() {
+    current = -1;
+    stage.classList.remove('active');
+    wall.style.display = 'flex';
+    controls.style.display = 'none';
+    hint.style.display = 'block';
+    frame.src = '';
+  }
+  function next() { if (current >= 0 && current < slides.length - 1) openSlide(current + 1); }
+  function prev() { if (current > 0) openSlide(current - 1); }
+
+  document.addEventListener('keydown', (e) => {
+    if (current < 0) return;
+    if (e.key === 'ArrowRight') next();
+    if (e.key === 'ArrowLeft') prev();
+    if (e.key === 'Escape') closeSlide();
+  });
+</script>
+</body>
+</html>
