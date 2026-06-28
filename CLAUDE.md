@@ -76,6 +76,63 @@
 1. 应用 SQL 到目标 DB
 2. 调用 `CapabilityProfileRegistry.invalidate("design")` 清缓存（或重启应用）
 
+### code-profile（Plan C 已落地）
+
+代码模式完整实现，遵循 SOLID/KISS/DRY/YAGNI/TDD。关键位置：
+
+| 资产 | 路径 |
+|---|---|
+| 实现 | `framework/agents/profile/impl/CodeProfile.java` |
+| Schema + systemPrompt 模板 | `framework/agents/profile/CodeSchema.java` |
+| TDD 状态机 | `framework/agents/profile/impl/TddPhaseManager.java` + `TddPhase.java` |
+| 编译 lint | `framework/agents/profile/lint/CompilePassRule.java`（py_compile/javac/go build） |
+| 测试 lint | `framework/agents/profile/lint/TestPassRule.java`（pytest/mvn/npm/go test） |
+| 反幻觉 API lint | `framework/agents/profile/lint/NoPhantomApiRule.java`（未注册的 module.method 或 imported symbol 拦截） |
+| 注释语言 lint | `framework/agents/profile/lint/CommentLanguageMatchRule.java` |
+| API 白名单 | `framework/agents/profile/lint/SymbolRegistry.java`（session 级 + `__shared__` 内置） |
+| package_lookup 工具 | `framework/agents/tool/impl/PackageLookupTool.java`（PyPI/NPM/Maven，成功后自动注册符号） |
+| sandbox 执行器 | `framework/agents/tool/impl/LocalSandboxExecutor.java`（ProcessBuilder，30s 超时） |
+| SandboxExecutor 接口 | `framework/agents/tool/SandboxExecutor.java`（CompilePassRule/TestPassRule 后端） |
+
+#### TDD 状态机
+
+```
+READ → TEST → TEST_HITL（强制中断）→ IMPL → EXEC → LINT → DONE
+                                ↑                ↓
+                                └── 失败 ≤3 次 ──┘
+                                  >3 次 → HITL
+```
+
+#### code-profile 工作流
+
+1. IntentClassifier 识别为 code → 加载 CodeProfile
+2. `file_read` 相关代码（Phase READ）
+3. `file_write` 失败测试（Phase TEST）→ TEST_HITL 强制中断
+4. 用户审批后 `file_write` 实现（Phase IMPL）
+5. `sandbox_exec` 跑测试（Phase EXEC）
+6. 4 条 lint（Phase LINT）→ 失败回 IMPL（≤3 次）→ 触发 HITL
+7. 完成（Phase DONE）
+
+#### ExecuteNode 接入
+
+`ExecuteNode` 注入了 `TddPhaseManager` + `SymbolRegistry`：
+- `apply(state)` 末尾调用 `applyTddPhase(state, result)` 把当前 phase 写入 `DeepAgentState.CURRENT_PHASE`
+- `buildStrategyHint` 的 `case TDD` 追加当前 phase 描述到拆分策略
+- public hook `onToolExecuted(state, toolName, toolResult)`：由 `ToolNode` 在工具执行后调用，按 `file_write` / `sandbox_exec` 推进 phase，并抽取源码 import 注册到 SymbolRegistry（**当前 ToolNode 未接入此 hook，待后续任务**）
+
+#### 第三方 API 防幻觉流程
+
+1. LLM 写代码前调 `package_lookup(language, pkg, symbol, sessionId)`
+2. PyPI/NPM/Maven 返回真实版本号 + summary
+3. 成功后 `PackageLookupTool` 自动 `registry.register(sessionId, symbol)` + 简短形式（如 `np.array` 同时注册 `array`）
+4. 后续 `file_write` 源码经 `NoPhantomApiRule` 校验：未注册的 `module.method` 或 `imported symbol` 被拦截
+
+#### 修改 code 配置
+
+更新 `sql/postgresql/sys_agent_profile_code_c.sql` 后：
+1. 应用 SQL 到目标 DB
+2. 调用 `CapabilityProfileRegistry.invalidate("code")` 清缓存（或重启应用）
+
 ### 修改 profile 配置
 
 DB 表 `sys_agent_profile` 修改后需调用 `CapabilityProfileRegistry.invalidate(profileId)` 清缓存（或重启应用）。
@@ -102,8 +159,16 @@ DB 表 `sys_agent_profile` 修改后需调用 `CapabilityProfileRegistry.invalid
 | `AntiSlopLintComplianceTest` | 10 份 slop 样本 HTML 拦截 / 第 10 份 clean 放过 |
 | `FileRenderToolTest` / `SessionChunkBufferTest` / `DesignAssetFetchToolTest` / `DesignDirectionExploreToolTest` | 4 个新工具单测 |
 | `DesignProfileEndToEndTest` (`@Tag("integration")`) | 真实 DB + 世界杯 PPT 端到端 |
+| `SymbolRegistryTest` / `TddPhaseManagerTest` | API 白名单 + TDD 状态机（合法迁移/HITL 门控/retry 预算） |
+| `CompilePassRuleTest` / `TestPassRuleTest` | sandbox 执行验证（命令模板 + Result 解析） |
+| `CommentLanguageMatchRuleTest` | 注释语言一致性（CJK 混用拦截） |
+| `NoPhantomApiRuleTest` + `PhantomApiLintComplianceTest` | 5 份样本（py/js）拦截合规回归 |
+| `PackageLookupToolTest` | PyPI/NPM 解析 + 符号注册（MockWebServer 隔离） |
+| `CodeProfileTest` | id/strategy/systemPrompt 渲染/4 lint 规则/outputFormat |
+| `AgentProfileServiceCodeBranchTest` | AgentProfileService case "code" 路由 CodeProfile |
+| `CodeProfileEndToEndTest` (`@Tag("integration")`) | 真实 DB + 快排 TDD 状态机端到端 |
 
-跑 Plan A + B 全部单测（排除 integration）：
+跑 Plan A + B + C 全部单测（排除 integration）：
 ```bash
-mvn test -Dtest='com.hypersense.boot.framework.agents.profile.*Test,FileRenderToolTest,SessionChunkBufferTest,DesignAssetFetchToolTest,DesignDirectionExploreToolTest,AgentProfileServiceDesignBranchTest,IntentClassifierNodeTest' -DexcludedGroups=integration -q
+mvn test -Dtest='com.hypersense.boot.framework.agents.profile.*Test,FileRenderToolTest,SessionChunkBufferTest,DesignAssetFetchToolTest,DesignDirectionExploreToolTest,AgentProfileServiceDesignBranchTest,AgentProfileServiceCodeBranchTest,IntentClassifierNodeTest' -DexcludedGroups=integration -q
 ```
