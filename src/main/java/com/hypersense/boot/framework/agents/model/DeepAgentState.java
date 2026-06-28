@@ -329,4 +329,27 @@ public class DeepAgentState extends AgentState {
     public Long tenantId() {
         return this.<Long>value(TENANT_ID).orElse(0L);
     }
+
+    // ========== Capability Profile 架构字段（Plan A 新增） ==========
+
+    /** 当前激活的 Profile id，如 "design" / "code" */
+    public static final String ACTIVE_PROFILE = "active_profile";
+
+    /** IntentClassifier 置信度 0.0~1.0 */
+    public static final String INTENT_CONFIDENCE = "intent_confidence";
+
+    /** 复合任务时串联顺序，List<String>，如 ["think", "code"] */
+    public static final String SECONDARY_PROFILES = "secondary_profiles";
+
+    /** IntentClassifier 输出的提示信息，Map<String, Object> */
+    public static final String PROFILE_HINTS = "profile_hints";
+
+    /** Profile 当前阶段，如 design 的 "demo"/"batch"，code 的 "test"/"impl" */
+    public static final String CURRENT_PHASE = "current_phase";
+
+    /** 串联时上游 Profile id */
+    public static final String PROFILE_HANDOFF_FROM = "profile_handoff_from";
+
+    /** 串联时上游产物路径，如 "think.md"，下游 Profile 可读取作为上下文 */
+    public static final String PROFILE_HANDOFF_CONTEXT = "profile_handoff_context";
 }
