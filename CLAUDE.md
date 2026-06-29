@@ -72,7 +72,7 @@
 
 #### 修改设计配置
 
-更新 `sql/postgresql/sys_agent_profile_design_b.sql` 后：
+更新 `sql/postgresql/capability/sys_agent_profile_design_b.sql` 后：
 1. 应用 SQL 到目标 DB
 2. 调用 `CapabilityProfileRegistry.invalidate("design")` 清缓存（或重启应用）
 
@@ -129,7 +129,7 @@ READ → TEST → TEST_HITL（强制中断）→ IMPL → EXEC → LINT → DONE
 
 #### 修改 code 配置
 
-更新 `sql/postgresql/sys_agent_profile_code_c.sql` 后：
+更新 `sql/postgresql/capability/sys_agent_profile_code_c.sql` 后：
 1. 应用 SQL 到目标 DB
 2. 调用 `CapabilityProfileRegistry.invalidate("code")` 清缓存（或重启应用）
 
