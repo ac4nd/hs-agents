@@ -242,12 +242,18 @@ class SkillIntegrationTest {
 
             // Mock 图构建
             CompiledGraph<DeepAgentState> graph = mock(CompiledGraph.class);
+            // P3#10：当前实现走三参 build 入口
+            when(deepAgentGraph.build(any(), any(), any(DeepAgentGraph.HitlBuildConfig.class))).thenReturn(graph);
             when(deepAgentGraph.build(any(DeepAgentGraph.HitlBuildConfig.class))).thenReturn(graph);
             when(deepAgentGraph.build()).thenReturn(graph);
 
             TaskExecutor taskExecutor = Runnable::run;
+            // P3#10：chatModelRegistry 必须注入
+            com.hypersense.boot.framework.agents.llm.ChatModelRegistry chatModelRegistry =
+                    mock(com.hypersense.boot.framework.agents.llm.ChatModelRegistry.class);
+            when(chatModelRegistry.getOrDefault(any())).thenReturn(null);
             agentService = new AgentServiceImpl(deepAgentGraph, agentProperties,
-                    redisTemplate, taskExecutor, sandboxManager, middleware, null, null, null, null, null,
+                    redisTemplate, taskExecutor, sandboxManager, middleware, null, chatModelRegistry, null, null, null,
                     mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class),
                     mock(com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode.class));
 
@@ -262,8 +268,8 @@ class SkillIntegrationTest {
             assertNotNull(session);
             assertEquals(SessionStatus.CREATED, session.getStatus());
 
-            // 验证图构建被调用
-            verify(deepAgentGraph).build(any(DeepAgentGraph.HitlBuildConfig.class));
+            // 验证图构建被调用（三参入口）
+            verify(deepAgentGraph).build(any(), any(), any(DeepAgentGraph.HitlBuildConfig.class));
 
             // 验证 Redis 保存（buildInitialState 的注入在 execute/streamExecute 时触发）
             verify(valueOperations).set(anyString(), any(AgentSessionVO.class),
@@ -275,13 +281,17 @@ class SkillIntegrationTest {
         @SuppressWarnings("unchecked")
         void testBuildInitialState_noMiddleware() throws Exception {
             CompiledGraph<DeepAgentState> graph = mock(CompiledGraph.class);
-            when(deepAgentGraph.build(any(DeepAgentGraph.HitlBuildConfig.class))).thenReturn(graph);
+            when(deepAgentGraph.build(any(), any(), any(DeepAgentGraph.HitlBuildConfig.class))).thenReturn(graph);
 
             // 不配置技能目录 → 不创建 SkillsMiddleware
             AgentProperties propsNoSkills = new AgentProperties();
             TaskExecutor taskExecutor = Runnable::run;
+            // P3#10：chatModelRegistry 必须注入
+            com.hypersense.boot.framework.agents.llm.ChatModelRegistry chatModelRegistry =
+                    mock(com.hypersense.boot.framework.agents.llm.ChatModelRegistry.class);
+            when(chatModelRegistry.getOrDefault(any())).thenReturn(null);
             AgentServiceImpl serviceNoSkills = new AgentServiceImpl(
-                    deepAgentGraph, propsNoSkills, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null,
+                    deepAgentGraph, propsNoSkills, redisTemplate, taskExecutor, sandboxManager, null, null, chatModelRegistry, null, null, null,
                     mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class),
                     mock(com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode.class));
 

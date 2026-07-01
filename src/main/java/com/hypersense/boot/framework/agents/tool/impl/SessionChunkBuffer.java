@@ -43,8 +43,7 @@ public class SessionChunkBuffer {
 
     /**
      * 追加 chunk 到 (sessionId, filename) 对应缓冲区。
-     *
-     * @throws IllegalStateException 该会话/文件尚未 start
+     * <p>容错：若未显式 start，自动初始化缓冲区（防 LLM 漏调 start 导致内容丢失）。</p>
      */
     public void append(String sessionId, String filename, String chunk) {
         if (chunk == null || chunk.isEmpty()) {
@@ -53,8 +52,11 @@ public class SessionChunkBuffer {
         Map<String, StringBuffer> sessionBuffers = buffers.get(sessionId);
         StringBuffer sb = sessionBuffers == null ? null : sessionBuffers.get(filename);
         if (sb == null) {
-            throw new IllegalStateException(
-                    "buffer not started for " + filename + " in session " + sessionId);
+            // 容错自动 start：LLM 漏调 start 时不再丢内容
+            log.warn("file_write_chunk: append 前 buffer 未 start，自动初始化 sessionId={}, file={}",
+                    sessionId, filename);
+            start(sessionId, filename);
+            sb = buffers.get(sessionId).get(filename);
         }
         if (chunk.length() > CHUNK_WARN_SIZE) {
             log.warn("file_write_chunk 单 chunk {} 字符超 {}，建议拆分",
@@ -65,15 +67,15 @@ public class SessionChunkBuffer {
 
     /**
      * 取出 (sessionId, filename) 的完整内容并清理对应缓冲；缓冲全空时一并清理 session 表项。
-     *
-     * @throws IllegalStateException 该会话/文件尚未 start
+     * <p>容错：未 start 时返回 null（不抛异常），由调用方决定降级策略。</p>
      */
     public String end(String sessionId, String filename) {
         Map<String, StringBuffer> sessionBuffers = buffers.get(sessionId);
         StringBuffer sb = sessionBuffers == null ? null : sessionBuffers.remove(filename);
         if (sb == null) {
-            throw new IllegalStateException(
-                    "buffer not started for " + filename + " in session " + sessionId);
+            log.warn("file_write_chunk: end 时 buffer 未 start，返回 null sessionId={}, file={}",
+                    sessionId, filename);
+            return null;
         }
         if (sessionBuffers.isEmpty()) {
             buffers.remove(sessionId);

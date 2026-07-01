@@ -78,7 +78,16 @@ class HitlTest {
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
 
         TaskExecutor taskExecutor = Runnable::run;
-        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class), mock(com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode.class));
+        // P3#10：chatModelRegistry 必须注入，createSession/getGraphOrThrow 调用 getOrDefault
+        com.hypersense.boot.framework.agents.llm.ChatModelRegistry chatModelRegistry =
+                mock(com.hypersense.boot.framework.agents.llm.ChatModelRegistry.class);
+        when(chatModelRegistry.getOrDefault(any())).thenReturn(null);
+        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null, null, chatModelRegistry, null, null, null, mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class), mock(com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode.class));
+        // mock 三参 build（当前实现入口）
+        try {
+            when(deepAgentGraph.build(any(), any(), any(DeepAgentGraph.HitlBuildConfig.class)))
+                    .thenReturn(mock(org.bsc.langgraph4j.CompiledGraph.class));
+        } catch (Exception ignored) {}
 
         securityUtilsMock = mockStatic(SecurityUtils.class);
         securityUtilsMock.when(SecurityUtils::getUserId).thenReturn(MOCK_USER_ID);
@@ -99,6 +108,8 @@ class HitlTest {
     @SuppressWarnings("unchecked")
     private CompiledGraph<DeepAgentState> mockGraphBuild() throws Exception {
         CompiledGraph<DeepAgentState> graph = mock(CompiledGraph.class);
+        // P3#10：当前实现走 build(ChatModel, StreamingChatModel, HitlBuildConfig) 三参入口
+        when(deepAgentGraph.build(any(), any(), any(DeepAgentGraph.HitlBuildConfig.class))).thenReturn(graph);
         when(deepAgentGraph.build(any(DeepAgentGraph.HitlBuildConfig.class))).thenReturn(graph);
         when(deepAgentGraph.build()).thenReturn(graph);
         return graph;
@@ -181,8 +192,8 @@ class HitlTest {
             assertTrue(session.getHitlEnabled(), "hitlEnabled 应为 true");
             assertNotNull(session.getHitlInterruptNodes(), "中断节点列表不应为 null");
 
-            // 验证调用带 HITL 配置的 build
-            verify(deepAgentGraph).build(any(DeepAgentGraph.HitlBuildConfig.class));
+            // P3#10：验证调用三参 build 入口（带 HITL 配置）
+            verify(deepAgentGraph).build(any(), any(), any(DeepAgentGraph.HitlBuildConfig.class));
         }
 
         @Test
@@ -209,8 +220,8 @@ class HitlTest {
 
             assertFalse(session.getHitlEnabled(), "hitlEnabled 应为 false");
 
-            // 验证调用不带 HITL 配置的 build（或带 disabled 配置）
-            verify(deepAgentGraph).build(any());
+            // P3#10：当前实现统一走三参 build 入口（hitlEnabled=false 时传 disabled 配置）
+            verify(deepAgentGraph).build(any(), any(), any(DeepAgentGraph.HitlBuildConfig.class));
         }
 
         @Test

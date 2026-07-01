@@ -47,6 +47,7 @@ class AgentServiceImplTest {
     @SuppressWarnings("unchecked")
     private ValueOperations<String, Object> valueOperations;
     private SandboxManager sandboxManager;
+    private com.hypersense.boot.framework.agents.llm.ChatModelRegistry chatModelRegistry;
     private AgentServiceImpl agentService;
 
     private MockedStatic<SecurityUtils> securityUtilsMock;
@@ -60,11 +61,19 @@ class AgentServiceImplTest {
         redisTemplate = mock(RedisTemplate.class);
         valueOperations = mock(ValueOperations.class);
         sandboxManager = mock(SandboxManager.class);
+        // P3#10：chatModelRegistry 不再可空，createSession 直接调用 getOrDefault
+        chatModelRegistry = mock(com.hypersense.boot.framework.agents.llm.ChatModelRegistry.class);
+        // 让 getOrDefault 返回 null，触发回退到 deepAgentGraph 默认 chatModel
+        when(chatModelRegistry.getOrDefault(any())).thenReturn(null);
 
         when(redisTemplate.opsForValue()).thenReturn(valueOperations);
 
         TaskExecutor taskExecutor = Runnable::run; // 同步执行器（测试用）
-        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor, sandboxManager, null, null, null, null, null, null, mock(com.hypersense.boot.system.service.DesignSystemConfigService.class), mock(AgentSessionService.class), mock(com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode.class));
+        agentService = new AgentServiceImpl(deepAgentGraph, agentProperties, redisTemplate, taskExecutor,
+                sandboxManager, null, null, chatModelRegistry, null, null, null,
+                mock(com.hypersense.boot.system.service.DesignSystemConfigService.class),
+                mock(AgentSessionService.class),
+                mock(com.hypersense.boot.framework.agents.engine.node.IntentClassifierNode.class));
 
         // Mock SecurityUtils.getUserId() 静态方法
         securityUtilsMock = mockStatic(SecurityUtils.class);
@@ -124,6 +133,8 @@ class AgentServiceImplTest {
     @SuppressWarnings("unchecked")
     private CompiledGraph<DeepAgentState> mockGraphBuild() throws Exception {
         CompiledGraph<DeepAgentState> graph = mock(CompiledGraph.class);
+        // P3#10：当前实现走 build(ChatModel, StreamingChatModel, HitlBuildConfig) 三参入口
+        when(deepAgentGraph.build(any(), any(), any(DeepAgentGraph.HitlBuildConfig.class))).thenReturn(graph);
         when(deepAgentGraph.build(any(DeepAgentGraph.HitlBuildConfig.class))).thenReturn(graph);
         when(deepAgentGraph.build()).thenReturn(graph);
         return graph;
@@ -167,8 +178,9 @@ class AgentServiceImplTest {
 
             agentService.createSession(buildForm("测试"));
 
-            // HITL 变更后使用 build(HitlBuildConfig)
-            verify(deepAgentGraph, times(1)).build(any(DeepAgentGraph.HitlBuildConfig.class));
+            // P3#10：当前实现走 build(ChatModel, StreamingChatModel, HitlBuildConfig) 三参入口
+            verify(deepAgentGraph, times(1))
+                    .build(any(), any(), any(DeepAgentGraph.HitlBuildConfig.class));
         }
 
         @Test
@@ -243,8 +255,8 @@ class AgentServiceImplTest {
             // 验证图被调用
             verify(graph).invoke(anyMap(), any(RunnableConfig.class));
 
-            // 验证沙箱被销毁
-            verify(sandboxManager).destroy(sessionId);
+            // P3#10：沙箱生命周期跟随会话（createSession/deleteSession），
+            // 单轮 execute 完成不再销毁，故此处不再 verify destroy
         }
 
         @Test
@@ -286,7 +298,9 @@ class AgentServiceImplTest {
             BusinessException ex = assertThrows(BusinessException.class,
                     () -> agentService.execute("fake-session-01", "测试"));
 
-            assertTrue(ex.getMessage().contains("图实例不存在"), "异常信息应包含 '图实例不存在'");
+            // P3#10：cache miss 时新实现尝试重建（fake session 未 mock build 三参 → 重建失败）
+            assertTrue(ex.getMessage().contains("图重建失败") || ex.getMessage().contains("图实例不存在"),
+                    "异常信息应包含 '图重建失败' 或 '图实例不存在'");
         }
 
         @Test
@@ -317,8 +331,7 @@ class AgentServiceImplTest {
             AgentSessionVO lastSaved = captor.getAllValues().get(captor.getAllValues().size() - 1);
             assertEquals(SessionStatus.FAILED, lastSaved.getStatus(), "失败后状态应标记为 FAILED");
 
-            // 验证沙箱被销毁
-            verify(sandboxManager).destroy(sessionId);
+            // P3#10：沙箱生命周期跟随会话，单轮失败不销毁，故此处不再 verify destroy
         }
     }
 
@@ -376,7 +389,8 @@ class AgentServiceImplTest {
             BusinessException ex = assertThrows(BusinessException.class,
                     () -> agentService.getSession(sessionId));
 
-            assertTrue(ex.getMessage().contains("数据异常"), "异常信息应包含 '数据异常'");
+            // P3#10：实际异常文案为 "Agent 会话数据类型异常"，"数据异常" 非其子串
+            assertTrue(ex.getMessage().contains("类型异常"), "异常信息应包含 '类型异常'");
         }
     }
 

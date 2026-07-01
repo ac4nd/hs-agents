@@ -75,11 +75,89 @@ public class LocalSandboxExecutor implements SandboxExecutor {
     }
 
     /**
-     * 简单 shlex：按空白切分。<b>不支持引号嵌套</b>，调用方传入的 command 必须避免
-     * 含空格的单一参数（当前 CompilePassRule / TestPassRule 的命令模板均满足此约束）。
+     * POSIX 风格 shlex：支持单引号 / 双引号包裹含空格的参数。
+     *
+     * <p>语义：</p>
+     * <ul>
+     *   <li>未加引号的空白为分隔符</li>
+     *   <li>单引号内内容原样保留（不转义）</li>
+     *   <li>双引号内支持 {@code \"} 和 {@code \\} 转义，其他原样保留</li>
+     *   <li>引号外支持 {@code \} 转义下一字符</li>
+     * </ul>
+     *
+     * <p>边界：未闭合引号按剩余全部内容归入当前参数（宽容，与 shell 一致）。
+     * 空 command 返回空数组（上层已在 {@link #exec} 入口拦截）。</p>
      */
-    private static String[] shlex(String command) {
-        return command.trim().split("\\s+");
+    static String[] shlex(String command) {
+        java.util.List<String> tokens = new java.util.ArrayList<>();
+        StringBuilder cur = new StringBuilder();
+        boolean inSingle = false;
+        boolean inDouble = false;
+        boolean hasToken = false;
+
+        for (int i = 0; i < command.length(); i++) {
+            char c = command.charAt(i);
+
+            if (inSingle) {
+                if (c == '\'') {
+                    inSingle = false;
+                } else {
+                    cur.append(c);
+                }
+                continue;
+            }
+
+            if (c == '\\' && !inDouble) {
+                // 双引号外或无引号：转义下一字符
+                if (i + 1 < command.length()) {
+                    cur.append(command.charAt(++i));
+                    hasToken = true;
+                }
+                continue;
+            }
+
+            if (c == '\\' && inDouble) {
+                if (i + 1 < command.length()) {
+                    char next = command.charAt(i + 1);
+                    if (next == '"' || next == '\\') {
+                        cur.append(next);
+                        i++;
+                        hasToken = true;
+                        continue;
+                    }
+                }
+                cur.append(c);
+                continue;
+            }
+
+            if (c == '"') {
+                inDouble = !inDouble;
+                hasToken = true;
+                continue;
+            }
+            if (c == '\'') {
+                inSingle = true;
+                hasToken = true;
+                continue;
+            }
+
+            if (Character.isWhitespace(c) && !inDouble) {
+                if (hasToken) {
+                    tokens.add(cur.toString());
+                    cur.setLength(0);
+                    hasToken = false;
+                }
+                continue;
+            }
+
+            cur.append(c);
+            hasToken = true;
+        }
+
+        if (hasToken) {
+            tokens.add(cur.toString());
+        }
+        return tokens.toArray(new String[0]);
     }
 
     private static String readAll(InputStream is) throws IOException {

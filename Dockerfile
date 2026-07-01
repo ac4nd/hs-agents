@@ -6,6 +6,9 @@ LABEL maintainer="youlai <youlaitech@163.com>"
 
 # 设置时区（Debian直接使用环境变量）
 ENV TZ=Asia/Shanghai
+# JVM 默认字符集强制 UTF-8，防止 Properties / IO / JSON 解析中文乱码
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
 
 # 在运行时自动挂载 /tmp 目录为匿名卷
 VOLUME /tmp
@@ -16,6 +19,8 @@ ADD target/godlikeagents.jar app.jar
 # 启动命令
 CMD java \
     -Xms512m -Xmx512m \
+    -Dfile.encoding=UTF-8 \
+    -Dsun.jnu.encoding=UTF-8 \
     -Djava.security.egd=file:/dev/./urandom \
     -jar /app.jar
 

@@ -679,6 +679,17 @@ public class AgentServiceImpl implements AgentService {
                     "请求过于频繁或已达配额上限，请稍后重试或切换其他模型",
                     detail);
         }
+        // 智谱 GLM 内容审核拦截：payload 含 "code":"1301" 或 contentFilter 标记
+        // 来源：dev.langchain4j.exception.InvalidRequestException / HttpException 包同一 payload
+        // 注意：此处只判断前端可见文案，原始 detail 仅进日志（catch 块外层 log.error 仍打全堆栈）
+        if (msg.contains("\"code\":\"1301\"") || msg.contains("contentfilter")
+                || msg.contains("content_filter") || msg.contains("内容可能包含不安全")
+                || msg.contains("敏感内容")) {
+            return new LlmErrorClassification(
+                    "content_filter",
+                    "内容被服务商审核拦截，请尝试换措辞或调整附件后重试",
+                    detail);
+        }
         return new LlmErrorClassification(
                 "unknown",
                 "智能体执行失败，请稍后重试；如持续失败请联系管理员",

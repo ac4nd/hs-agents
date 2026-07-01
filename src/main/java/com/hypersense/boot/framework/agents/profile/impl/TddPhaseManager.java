@@ -62,11 +62,19 @@ public class TddPhaseManager {
     }
     public void approveHITL() { approveHITL("__test__"); }
 
+    /**
+     * Plan C P1#5：lint 失败推进语义修正。
+     * <p>第 1/2 次失败（n < MAX_LINT_RETRIES）→ phase 切回 IMPL 等待 retry；
+     * 第 3 次（n == MAX_LINT_RETRIES）→ 保持 LINT，等待 HITL 审批。</p>
+     * <p>原逻辑 {@code n <= MAX_LINT_RETRIES} 会让第 3 次失败仍切到 IMPL，导致 retry 预算
+     * 永远耗不尽，TDD 链路无法触发 HITL 中断。</p>
+     */
     public void failLint(String sessionId) {
         int n = sessionLintFailures.merge(sessionId, 1, Integer::sum);
-        if (n <= MAX_LINT_RETRIES) {
+        if (n < MAX_LINT_RETRIES) {
             sessionPhase.put(sessionId, TddPhase.IMPL);
         }
+        // n >= MAX_LINT_RETRIES：保持 LINT，由 shouldInterruptForHITL 触发中断
     }
     public void failLint() { failLint("__test__"); }
 

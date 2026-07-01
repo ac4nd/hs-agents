@@ -137,7 +137,11 @@ public class FileWriteTool implements ToolProvider {
 
         try {
             Sandbox sandbox = sandboxManager.getOrCreate(sessionId);
+            long startMs = System.currentTimeMillis();
+            log.info("FileWriteTool: 写入开始 sessionId={}, path={}, bytes={}, startTs={}",
+                    sessionId, fullPath, content.length(), startMs);
             SandboxResult result = sandbox.writeFile(fullPath, content);
+            long elapsedMs = System.currentTimeMillis() - startMs;
             if (result.isSuccess()) {
                 base.put("success", true);
                 // message 字段对 LLM 可见：使用相对路径，避免暴露 Windows 绝对路径导致 LLM 编造
@@ -147,16 +151,19 @@ public class FileWriteTool implements ToolProvider {
                 base.put("workspacePath", workspacePath);
                 // bytesWritten 紧跟 message，便于审计
                 base.put("bytesWritten", content.length());
-                log.info("FileWriteTool: 写入成功 sessionId={}, path={}, bytes={}",
-                        sessionId, fullPath, content.length());
+                base.put("elapsedMs", elapsedMs);
+                log.info("FileWriteTool: 写入完成 sessionId={}, path={}, bytes={}, elapsedMs={}, throughput={}KB/s",
+                        sessionId, fullPath, content.length(), elapsedMs,
+                        elapsedMs > 0 ? (content.length() / 1024.0 / (elapsedMs / 1000.0)) : -1);
             } else {
                 base.put("success", false);
                 base.put("message", "沙箱写入失败: " + workspacePath);
                 base.put("relativePath", relativePath);
                 base.put("workspacePath", workspacePath);
                 base.put("error", result.getError() != null ? result.getError() : "未知错误");
-                log.warn("FileWriteTool: 写入失败 sessionId={}, path={}, err={}",
-                        sessionId, fullPath, result.getError());
+                base.put("elapsedMs", elapsedMs);
+                log.warn("FileWriteTool: 写入失败 sessionId={}, path={}, elapsedMs={}, err={}",
+                        sessionId, fullPath, elapsedMs, result.getError());
             }
         } catch (Exception e) {
             base.put("success", false);

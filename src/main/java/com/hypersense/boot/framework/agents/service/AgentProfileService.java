@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 /**
  * AgentProfile 业务服务：把 DB 实体转换为 CapabilityProfile 实例。
@@ -42,31 +43,42 @@ public class AgentProfileService {
     }
 
     /**
-     * 按 profileId 加载实体并包装为 CapabilityProfile（sessionId 为 null）。
+     * 按 profileId 加载实体并包装为 CapabilityProfile（sessionId / hints 均为 null）。
      * CapabilityProfileRegistry 依赖此 1-arg 签名。
      * @throws ProfileNotFoundException 当 profileId 不存在或被禁用
      */
     @IgnoreTenant
     public CapabilityProfile loadProfile(String profileId) {
-        return loadProfile(profileId, null);
+        return loadProfile(profileId, null, null);
     }
 
     /**
-     * 按 profileId + sessionId 加载实体并包装为 CapabilityProfile。
+     * 按 profileId + sessionId 加载（hints=null）。
      * sessionId 用于 CodeProfile 的 no_phantom_api lint（隔离 session 级符号缓存）。
      * @throws ProfileNotFoundException 当 profileId 不存在或被禁用
      */
     @IgnoreTenant
     public CapabilityProfile loadProfile(String profileId, String sessionId) {
+        return loadProfile(profileId, sessionId, null);
+    }
+
+    /**
+     * 按 profileId + sessionId + hints 加载（Plan C P0#3 新增 hints 入参）。
+     * <p>hints 提供 CodeProfile 的 language/sourceFile/testFile；缺失时回退默认值。
+     * 由调用方从 {@code DeepAgentState.PROFILE_HINTS} 取出后透传。</p>
+     * @throws ProfileNotFoundException 当 profileId 不存在或被禁用
+     */
+    @IgnoreTenant
+    public CapabilityProfile loadProfile(String profileId, String sessionId, Map<String, Object> hints) {
         AgentProfileEntity entity = mapper.findEnabledByProfileId(profileId);
         if (entity == null) {
             throw new ProfileNotFoundException(profileId);
         }
-        return buildProfile(entity, sessionId);
+        return buildProfile(entity, sessionId, hints);
     }
 
     @IgnoreTenant
-    private CapabilityProfile buildProfile(AgentProfileEntity entity, String sessionId) {
+    private CapabilityProfile buildProfile(AgentProfileEntity entity, String sessionId, Map<String, Object> hints) {
         List<String> tools = parseStringList(entity.getAllowedTools());
         HitlPolicy policy = parseHitlPolicy(entity.getHitlPolicy());
         String template = entity.getSystemPrompt();
@@ -78,13 +90,22 @@ public class AgentProfileService {
         return switch (id) {
             case "design" -> DesignProfile.withBrandColor(
                     resolveBrandPrimary(outputFormat), template, tools, outputFormat, policy);
-            // TODO(task 11): language/sourceFile/testFile 当前为临时占位，应从 DeepAgentState 读取真实值。
+            // P0#3：language/sourceFile/testFile 从 hints 读，缺失时回退 Python 默认值
             case "code" -> CodeProfile.withRuntimeContext(
                     sandbox, symbolRegistry, sessionId == null ? "__default__" : sessionId,
-                    "python", "src/main.py", "test/test_main.py",
+                    hintStr(hints, "language", "python"),
+                    hintStr(hints, "sourceFile", "src/main.py"),
+                    hintStr(hints, "testFile", "test/test_main.py"),
                     template, tools, outputFormat, policy);
             default -> new GenericProfile(id, name, template, tools, strategy, outputFormat, policy);
         };
+    }
+
+    /** 从 hints Map 安全取字符串，缺失/空白时回退默认值。 */
+    private static String hintStr(Map<String, Object> hints, String key, String def) {
+        if (hints == null) return def;
+        Object v = hints.get(key);
+        return (v == null || v.toString().isBlank()) ? def : v.toString();
     }
 
     /** 从 outputFormat 或 entity 字段提取 design system 主色；无则返回 null 跳过 brand_color_drift */

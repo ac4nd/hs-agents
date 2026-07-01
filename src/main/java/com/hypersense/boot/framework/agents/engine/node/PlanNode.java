@@ -421,8 +421,9 @@ public class PlanNode implements NodeAction<DeepAgentState> {
         String activeProfileId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE).orElse(null);
         if (activeProfileId == null || activeProfileId.isBlank()) return "";
         try {
-            com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId);
             String sessionId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.SESSION_ID).orElse(null);
+            java.util.Map<String, Object> hints = state.<java.util.Map<String, Object>>value(com.hypersense.boot.framework.agents.model.DeepAgentState.PROFILE_HINTS).orElse(java.util.Map.of());
+            com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId, sessionId, hints);
             String userInput = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.INSTRUCTIONS).orElse(null);
             Long userId = state.<Long>value(com.hypersense.boot.framework.agents.model.DeepAgentState.USER_ID).orElse(null);
             Long tenantId = state.<Long>value(com.hypersense.boot.framework.agents.model.DeepAgentState.TENANT_ID).orElse(null);

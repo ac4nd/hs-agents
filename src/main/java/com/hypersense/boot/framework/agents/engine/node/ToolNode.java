@@ -58,6 +58,16 @@ public class ToolNode implements NodeAction<DeepAgentState> {
     private static final java.util.Set<String> BUILT_IN_ALWAYS_ON_TOOLS =
             java.util.Set.of("reply_text");
 
+    /**
+     * LLM 工具决策 / 纯文本回退路径的最大输出 token 数。
+     * <p>历史值 8192 在 design profile 生成完整 HTML 时被频繁截断（HTML 仅到 {@code <body>}
+     * 标签就被砍掉，整页黑屏）。但 32K 会让 LLM 倾向生成 12-18K tokens 的臃肿 HTML
+     * （design profile systemPrompt 已写死「6K tokens / 24KB」铁律），导致生成时间从 8s 膨胀到 25s。
+     * 16K 上限足够覆盖：6K HTML + 思考链 + 工具参数 + 余量，且能抑制 LLM 在 CSS 里铺陈 design token。
+     * 截断兜底由 {@link #rescueContentFromText} + {@link #tryPlainTextFallbackForFileWrite} 负责。</p>
+     */
+    private static final int LLM_MAX_OUTPUT_TOKENS = 32768;
+
     private final List<ToolProvider> toolProviders;
     private final ToolRetryConfig retryConfig;
     /** 可选：LangChain4j function-call 决策模型；为 null 时走旧遍历逻辑 */
@@ -77,6 +87,26 @@ public class ToolNode implements NodeAction<DeepAgentState> {
      */
     private final com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry;
 
+    /**
+     * 可选：TDD 状态机管理器。code-profile 下，工具执行后调用其推进 phase。
+     * <p> nullable：测试 / 非 Spring 路径可不注入。 </p>
+     */
+    private final com.hypersense.boot.framework.agents.profile.impl.TddPhaseManager tddPhaseManager;
+
+    /**
+     * 可选：API 符号白名单。code-profile 下，file_write 后抽取源码 import 注册到本表，
+     * 供后续 {@code no_phantom_api} lint 校验。
+     * <p> nullable：同上。 </p>
+     */
+    private final com.hypersense.boot.framework.agents.profile.lint.SymbolRegistry symbolRegistry;
+
+    /**
+     * 可选：lint 违规计数器。file_write/file_render 后扫描 profile.lintRules() 命中时累加，
+     * 超 {@code HitlPolicy.maxLintRetriesBeforeInterrupt} 时触发 INTERRUPT。
+     * <p> nullable：测试 / 非 Spring 路径可不注入。 </p>
+     */
+    private final com.hypersense.boot.framework.agents.profile.lint.LintStatsManager lintStatsManager;
+
     @Autowired
     public ToolNode(@Nullable List<ToolProvider> toolProviders,
                     @Nullable AgentProperties agentProperties,
@@ -84,7 +114,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                     @Nullable com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry) {
         this(toolProviders,
                 resolveRetryConfig(agentProperties),
-                chatModel, null, profileRegistry);
+                chatModel, null, profileRegistry, null, null, null);
     }
 
     /** 旧签名兼容：Spring 自动注入时如未显式注入 ChatModel 仍可工作（走旧遍历逻辑）。 */
@@ -92,7 +122,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                     @Nullable AgentProperties agentProperties) {
         this(toolProviders,
                 resolveRetryConfig(agentProperties),
-                null, null, null);
+                null, null, null, null, null, null);
     }
 
     /**
@@ -100,7 +130,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
      * 旧二参版本，保留以兼容既有调用方（如 ToolRetryTest）。
      */
     public static ToolNode create(List<ToolProvider> toolProviders, ToolRetryConfig retryConfig) {
-        return new ToolNode(toolProviders, retryConfig != null ? retryConfig : ToolRetryConfig.disabled(), null, null, null);
+        return new ToolNode(toolProviders, retryConfig != null ? retryConfig : ToolRetryConfig.disabled(), null, null, null, null, null, null);
     }
 
     /**
@@ -109,7 +139,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
     public static ToolNode create(List<ToolProvider> toolProviders, ToolRetryConfig retryConfig, ChatModel chatModel) {
         return new ToolNode(toolProviders,
                 retryConfig != null ? retryConfig : ToolRetryConfig.disabled(),
-                chatModel, null, null);
+                chatModel, null, null, null, null, null);
     }
 
     /**
@@ -121,7 +151,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                                   dev.langchain4j.model.chat.StreamingChatModel streamingChatModel) {
         return new ToolNode(toolProviders,
                 retryConfig != null ? retryConfig : ToolRetryConfig.disabled(),
-                chatModel, streamingChatModel, null);
+                chatModel, streamingChatModel, null, null, null, null);
     }
 
     /**
@@ -134,17 +164,56 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                                   com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry) {
         return new ToolNode(toolProviders,
                 retryConfig != null ? retryConfig : ToolRetryConfig.disabled(),
-                chatModel, streamingChatModel, profileRegistry);
+                chatModel, streamingChatModel, profileRegistry, null, null, null);
+    }
+
+    /**
+     * Builder 路径（含 Plan C code-profile 资产）：在 profileRegistry 之上追加 TddPhaseManager + SymbolRegistry，
+     * 使 ToolNode 能在 file_write / sandbox_exec 后推进 TDD 状态机并注册 import。
+     * <p>主链路 NodeFactory 应使用此重载注入全部依赖。</p>
+     */
+    public static ToolNode create(List<ToolProvider> toolProviders, ToolRetryConfig retryConfig,
+                                  ChatModel chatModel,
+                                  dev.langchain4j.model.chat.StreamingChatModel streamingChatModel,
+                                  com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry,
+                                  com.hypersense.boot.framework.agents.profile.impl.TddPhaseManager tddPhaseManager,
+                                  com.hypersense.boot.framework.agents.profile.lint.SymbolRegistry symbolRegistry) {
+        return new ToolNode(toolProviders,
+                retryConfig != null ? retryConfig : ToolRetryConfig.disabled(),
+                chatModel, streamingChatModel, profileRegistry, tddPhaseManager, symbolRegistry, null);
+    }
+
+    /**
+     * Builder 路径（含 Plan C lint 计数器，P0#2 完整版）：在 7 参基础上追加 LintStatsManager，
+     * 使 ToolNode 能在 lint 违规累计达阈值时触发 INTERRUPT。
+     * <p>主链路 NodeFactory 应使用此重载注入全部依赖。</p>
+     */
+    public static ToolNode create(List<ToolProvider> toolProviders, ToolRetryConfig retryConfig,
+                                  ChatModel chatModel,
+                                  dev.langchain4j.model.chat.StreamingChatModel streamingChatModel,
+                                  com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry,
+                                  com.hypersense.boot.framework.agents.profile.impl.TddPhaseManager tddPhaseManager,
+                                  com.hypersense.boot.framework.agents.profile.lint.SymbolRegistry symbolRegistry,
+                                  com.hypersense.boot.framework.agents.profile.lint.LintStatsManager lintStatsManager) {
+        return new ToolNode(toolProviders,
+                retryConfig != null ? retryConfig : ToolRetryConfig.disabled(),
+                chatModel, streamingChatModel, profileRegistry, tddPhaseManager, symbolRegistry, lintStatsManager);
     }
 
     private ToolNode(List<ToolProvider> toolProviders, ToolRetryConfig retryConfig, ChatModel chatModel,
                      dev.langchain4j.model.chat.StreamingChatModel streamingChatModel,
-                     com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry) {
+                     com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry,
+                     com.hypersense.boot.framework.agents.profile.impl.TddPhaseManager tddPhaseManager,
+                     com.hypersense.boot.framework.agents.profile.lint.SymbolRegistry symbolRegistry,
+                     com.hypersense.boot.framework.agents.profile.lint.LintStatsManager lintStatsManager) {
         this.toolProviders = toolProviders;
         this.retryConfig = retryConfig;
         this.chatModel = chatModel;
         this.streamingChatModel = streamingChatModel;
         this.profileRegistry = profileRegistry;
+        this.tddPhaseManager = tddPhaseManager;
+        this.symbolRegistry = symbolRegistry;
+        this.lintStatsManager = lintStatsManager;
     }
 
     private static ToolRetryConfig resolveRetryConfig(AgentProperties props) {
@@ -170,7 +239,9 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         String activeProfileId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE).orElse(null);
         if (activeProfileId == null || activeProfileId.isBlank()) return null;
         try {
-            com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId);
+            String sessionId = state.<String>value(DeepAgentState.SESSION_ID).orElse(null);
+            java.util.Map<String, Object> hints = state.<java.util.Map<String, Object>>value(DeepAgentState.PROFILE_HINTS).orElse(java.util.Map.of());
+            com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId, sessionId, hints);
             if (profile == null) return null;
             return profile.allowedTools();
         } catch (Exception e) {
@@ -206,6 +277,31 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         return o;
     }
 
+    /**
+     * LLM 工具名别名规范化：把 LLM 常用的「直觉名」映射到当前 profile 白名单内的等价工具。
+     * <p>背景：design profile 严禁 {@code file_write}（不在白名单），但 LLM 训练语料里
+     * {@code file_write} 是最常见文件写入名，强 prompt 也压不住——直接由代码层别名兜底。</p>
+     * <p>当前规则（按 activeProfileId + requestedName 匹配）：</p>
+     * <ul>
+     *   <li>design profile：{@code file_write} / {@code file_save} / {@code save_file} → {@code file_write_chunk}</li>
+     * </ul>
+     * <p>命中别名时返回规范名，否则原样返回。</p>
+     */
+    private String normalizeToolAlias(String requestedName, DeepAgentState state) {
+        if (requestedName == null) {
+            return null;
+        }
+        String profileId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE).orElse("");
+        if ("design".equals(profileId)) {
+            String lower = requestedName.toLowerCase();
+            if (lower.equals("file_write") || lower.equals("file_save") || lower.equals("save_file")) {
+                log.warn("ToolNode: design profile 工具别名 [{}] → [file_write_chunk]", requestedName);
+                return "file_write_chunk";
+            }
+        }
+        return requestedName;
+    }
+
     @Override
     public Map<String, Object> apply(DeepAgentState state) {
         Optional<TodoItem> currentTodoOpt = state.currentTodo();
@@ -238,10 +334,58 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         Map<String, Object> toolResults = new HashMap<>();
         Map<String, String> files = new HashMap<>(state.files());
         boolean llmDecisionUsed = false;
+        // Plan C P0#2：lint 累计违规触发 HITL 中断时填入（最终合并到返回 Map）
+        String lintInterruptReason = null;
+        String lintInterruptSeverity = null;
+
+        // 短路：reply_text 是纯文本回显通道（非"工具选择"语义），不应走 function-calling 决策。
+        // 否则 LLM 会把"完整 SUMMARY 文本"塞进 tool args，function-calling 模式下 onPartialResponse
+        // 不回调（注释见 emitCodeStreamingForFileWriteOnce），HTTP 线程在 decideByLlmStreaming
+        // 的 future.get(10, MINUTES) 同步阻塞，期间 SSE 缓冲区无法 flush，前端表现为"卡死直到服务关闭"。
+        // 命中条件：候选含 reply_text 且 TODO 描述显式声明使用 reply_text（PlanNode 已统一此契约）。
+        // 改走纯文本直出（无 toolSpecifications），LLM 几秒内返回短文本，立即调 ReplyTextTool.execute。
+        if (chatModel != null && candidates.stream().anyMatch(t -> "reply_text".equals(t.name()))
+                && isReplyTextTodo(todo.getDescription())) {
+            LlmDecisionOutcome replyOutcome = tryPlainTextForReplyText(candidates, todo, state);
+            if (replyOutcome != null && replyOutcome.chosen != null) {
+                llmDecisionUsed = true;
+                String chosenName = replyOutcome.chosen.name();
+                try {
+                    Object result = replyOutcome.toolResultOverride != null
+                            ? replyOutcome.toolResultOverride
+                            : executeWithRetry(replyOutcome.chosen, replyOutcome.args);
+                    toolResults.put(chosenName, result);
+                    log.info("ToolNode: reply_text 短路直出成功（跳过 function-calling 决策）");
+                    emit(AgentEventType.TOOL_CALL, "调用工具: " + todo.getDescription(),
+                            buildCallData(todo, candidates, replyOutcome.chosen, replyOutcome.args, true, null));
+                } catch (Exception e) {
+                    log.error("ToolNode: reply_text 短路执行失败", e);
+                    toolResults.put(chosenName, "执行失败: " + e.getMessage());
+                    emit(AgentEventType.TOOL_CALL, "调用工具失败: " + todo.getDescription(),
+                            buildCallData(todo, candidates, replyOutcome.chosen, replyOutcome.args, false,
+                                    "工具执行异常: " + e.getMessage()));
+                }
+            }
+        }
 
         // 优先：LangChain4j function-call 决策（chatModel 已注入且候选非空）
-        if (chatModel != null && !candidates.isEmpty()) {
-            LlmDecisionOutcome outcome = decideByLlm(candidates, todo, state);
+        if (!llmDecisionUsed && chatModel != null && !candidates.isEmpty()) {
+            // 主动短路：design profile + HTML 类 TODO 直接走纯文本 artifact 模式
+            // 背景：function calling 模式下 LLM 把完整 HTML 塞 tool args，前端 6 分钟看不到任何输出；
+            // 纯文本模式 LLM 流式输出 HTML 到聊天框，用户实时看到代码增长，完成后从 <artifact> 解析落盘。
+            // 命中后 tryPlainTextFallbackForFileWrite 直接执行工具，复用其返回的 outcome；
+            // 失败（返回 null）自动降级到原 function calling 决策路径。
+            LlmDecisionOutcome outcome = null;
+            if (isDesignHtmlTodo(state, todo, candidates)) {
+                log.info("ToolNode: design profile + HTML TODO 短路纯文本 artifact 模式 todoId={}", todo.getId());
+                outcome = tryPlainTextFallbackForFileWrite("file_write_chunk", candidates, todo, state, null);
+                if (outcome == null) {
+                    log.warn("ToolNode: design HTML 短路失败，降级到 function calling todoId={}", todo.getId());
+                }
+            }
+            if (outcome == null) {
+                outcome = decideByLlm(candidates, todo, state);
+            }
             if (outcome != null && outcome.chosen != null) {
                 llmDecisionUsed = true;
                 String chosenName = outcome.chosen.name();
@@ -256,6 +400,12 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                     }
                     toolResults.put(chosenName, result);
                     handleFileWriteSideEffect(outcome.chosen, result, state, todo, files);
+                    advanceTddPhase(state, chosenName, result);
+                    String lintSig = runProfileLint(state, chosenName, result, todo);
+                    if (lintSig != null && lintInterruptReason == null) {
+                        lintInterruptReason = lintSig;
+                        lintInterruptSeverity = "high";
+                    }
                     log.info("ToolNode: LLM 决策调用工具 [{}] 成功", chosenName);
 
                     emit(AgentEventType.TOOL_CALL, "调用工具: " + todo.getDescription(),
@@ -280,8 +430,9 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         // 回退：旧"遍历候选执行"路径（chatModel 为 null 或 LLM 决策异常时）
         if (!llmDecisionUsed && toolResults.isEmpty()) {
             log.info("ToolNode: 走旧遍历路径执行候选工具（候选数={}）", candidates.size());
+            // 旧路径无 LLM 决策，reason 为 null（前端隐藏"选中原因"块），candidates 经 buildCallData 透传为 tools
             emit(AgentEventType.TOOL_CALL, "调用工具: " + todo.getDescription(),
-                    Map.of("todo", todo, "tools", candidates.stream().map(ToolProvider::name).toList()));
+                    buildCallData(todo, candidates, null, Map.of(), false, null));
             for (ToolProvider tool : candidates) {
                 try {
                     Map<String, Object> params = new HashMap<>();
@@ -294,6 +445,16 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                     Object result = executeWithRetry(tool, params);
                     toolResults.put(tool.name(), result);
                     handleFileWriteSideEffect(tool, result, state, todo, files);
+                    advanceTddPhase(state, tool.name(), result);
+                    String lintSig = runProfileLint(state, tool.name(), result, todo);
+                    if (lintSig != null && lintInterruptReason == null) {
+                        lintInterruptReason = lintSig;
+                        lintInterruptSeverity = "high";
+                    }
+                    // 每个候选执行后补发一次 TOOL_CALL，携带 toolName/arguments（前端可看实际选中工具与参数）
+                    Map<String, Object> execArgs = new HashMap<>(params);
+                    emit(AgentEventType.TOOL_CALL, "调用工具: " + todo.getDescription(),
+                            buildCallData(todo, candidates, tool, execArgs, true, null));
                     log.info("ToolNode: 工具 [{}] 执行成功（旧路径）", tool.name());
                 } catch (Exception e) {
                     log.error("ToolNode: 工具 [{}] 执行失败（旧路径）", tool.name(), e);
@@ -356,11 +517,16 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         messages.add(AiMessage.from(String.format("工具调用完成: %s", toolResults.keySet())));
         messages.addAll(multimodalMessages);
 
-        return Map.of(
-                DeepAgentState.TODOS, updatedTodos,
-                DeepAgentState.FILES, files,
-                DeepAgentState.MESSAGES, messages
-        );
+        Map<String, Object> output = new HashMap<>();
+        output.put(DeepAgentState.TODOS, updatedTodos);
+        output.put(DeepAgentState.FILES, files);
+        output.put(DeepAgentState.MESSAGES, messages);
+        if (lintInterruptReason != null) {
+            output.put(DeepAgentState.NEED_CONFIRMATION, true);
+            output.put(DeepAgentState.INTERRUPT_REASON, lintInterruptReason);
+            output.put(DeepAgentState.INTERRUPT_SEVERITY, lintInterruptSeverity);
+        }
+        return output;
     }
 
     /**
@@ -462,7 +628,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
             dev.langchain4j.model.chat.request.ChatRequest req = dev.langchain4j.model.chat.request.ChatRequest.builder()
                     .messages(messages)
                     .toolSpecifications(specs)
-                    .maxOutputTokens(8192)
+                    .maxOutputTokens(LLM_MAX_OUTPUT_TOKENS)
                     .build();
 
             // 主线程捕获事件消费者（langchain4j 流式回调在 HTTP 线程，ThreadLocal 拿不到）
@@ -495,17 +661,9 @@ public class ToolNode implements NodeAction<DeepAgentState> {
 
             ChatResponse resp;
             try {
-                // 流式整体等待上限：10 分钟（覆盖极慢模型 + 8K 输出）
                 resp = future.get(10, java.util.concurrent.TimeUnit.MINUTES);
-            } catch (java.util.concurrent.TimeoutException te) {
-                // 超时必须 cancel，避免 streaming HTTP 连接和回调线程泄漏
-                log.warn("ToolNode: 流式 LLM 调用超时（10 分钟），取消任务 attempt={} err={}", attempt, te.getMessage());
-                future.cancel(true);
-                if (attempt < maxRetry) continue;
-                return null;
             } catch (Exception e) {
                 log.warn("ToolNode: 流式 LLM 调用失败 attempt={} err={}", attempt, e.getMessage());
-                // 异常路径也要尝试 cancel（future 可能还在跑）
                 future.cancel(true);
                 if (attempt < maxRetry) continue;
                 return null;
@@ -519,7 +677,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
             }
 
             ToolExecutionRequest req2 = ai.toolExecutionRequests().get(0);
-            String reqName = req2.name();
+            String reqName = normalizeToolAlias(req2.name(), state);
             // Plan A：在工具选择前先校验 active profile 的 allowedTools 白名单（流式路径）
             LlmDecisionOutcome profileReject = rejectIfNotInProfile(reqName, state);
             if (profileReject != null) {
@@ -548,6 +706,16 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                 }
                 o.args.put("todo_description", todo.getDescription());
                 o.args.put("instructions", state.instructions());
+                // Plan #1：function calling 模式下 LLM 把内容塞 tool args，
+                // onPartialResponse 通常不会被回调（langchain4j 不流式吐 args 片段），
+                // 导致 file_write / file_write_chunk 在 function-call 路径下前端永远收不到
+                // CODE_STREAMING。这里在「LLM 完成 → 工具执行」之间补发一次：
+                // 把 content / chunk 字段作为 accumulated 整体推送，前端能立即看到完整代码气泡。
+                // 去重：纯文本回退路径已在 onPartialResponse 里 emit 过（accumulator 非空），
+                //      function-call 路径下 accumulator 为空才补发，避免重复。
+                emitCodeStreamingForFileWriteOnce(eventConsumer, codeAccumulator,
+                        streamTodoId, streamTodoDesc, streamSessionId,
+                        o.chosen.name(), o.args);
                 return o;
             } catch (com.hypersense.boot.common.exception.BusinessException be) {
                 log.error("ToolNode: 流式参数校验失败 attempt={} err={}", attempt, be.getMessage());
@@ -561,7 +729,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                     log.warn("ToolNode: file_write content 缺失（静默处理），跳过重试，立即触发纯文本回退（流式路径）. todoId={} reason={}",
                             todo.getId(), be.getMessage());
                     LlmDecisionOutcome fallback = tryPlainTextFallbackForFileWrite(
-                            "file_write", candidates, todo, state, be);
+                            reqName, candidates, todo, state, be);
                     if (fallback != null) {
                         return fallback;
                     }
@@ -646,6 +814,8 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         final int maxRetry = 2;
         String feedback = null;
         for (int attempt = 0; attempt <= maxRetry; attempt++) {
+            // reqName 提到 try 外：catch 块（纯文本回退）需要按实际工具名分支
+            String reqName = null;
             try {
                 List<ToolSpecification> specs = new ArrayList<>();
                 for (ToolProvider t : candidates) {
@@ -666,7 +836,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                 ChatResponse resp = chatModel.chat(ChatRequest.builder()
                         .messages(messages)
                         .toolSpecifications(specs)
-                        .maxOutputTokens(8192)
+                        .maxOutputTokens(LLM_MAX_OUTPUT_TOKENS)
                         .build());
                 AiMessage ai = resp.aiMessage();
 
@@ -677,14 +847,15 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                 }
 
                 ToolExecutionRequest req = ai.toolExecutionRequests().get(0);
-                String reqName = req.name();
+                reqName = normalizeToolAlias(req.name(), state);
                 // Plan A：在工具选择前先校验 active profile 的 allowedTools 白名单（同步路径）
                 LlmDecisionOutcome profileReject = rejectIfNotInProfile(reqName, state);
                 if (profileReject != null) {
                     return profileReject;
                 }
+                final String chosenReqName = reqName; // lambda 捕获需要 effectively final
                 Optional<ToolProvider> chosenOpt = candidates.stream()
-                        .filter(t -> t.name().equals(reqName))
+                        .filter(t -> t.name().equals(chosenReqName))
                         .findFirst();
                 if (chosenOpt.isEmpty()) {
                     LlmDecisionOutcome o = new LlmDecisionOutcome();
@@ -707,6 +878,19 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                 // 兜底保留 todo_description，供 FileWriteTool 自动命名时取用
                 o.args.put("todo_description", todo.getDescription());
                 o.args.put("instructions", state.instructions());
+                // Plan #1（同步路径）：与 decideByLlmStreaming 对齐，function calling 模式下
+                // 补发一次 CODE_STREAMING，避免同步路径 file_write/file_write_chunk 前端永远看不到代码气泡。
+                // 同步路径没有流式 token（chatModel.chat 是一次性返回），onPartialResponse 不存在；
+                // 直接把 LLM 填好的 content/chunk 整体作为 accumulated 推送。
+                try {
+                    java.util.function.Consumer<com.hypersense.boot.framework.agents.model.AgentEvent> syncConsumer =
+                            com.hypersense.boot.framework.agents.engine.SubAgentEventBus.get();
+                    emitCodeStreamingForFileWriteOnce(syncConsumer, new StringBuilder(),
+                            todo.getId(), todo.getDescription(), state.sessionId(),
+                            o.chosen.name(), o.args);
+                } catch (Throwable ignored) {
+                    // 同步路径补发失败绝不能影响主流程
+                }
                 return o;
             } catch (com.hypersense.boot.common.exception.BusinessException be) {
                 // 参数校验失败：不允许静默降级，反馈给 LLM 重试
@@ -721,7 +905,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                     log.warn("ToolNode: file_write content 缺失（静默处理），跳过重试，立即触发纯文本回退（同步路径）. todoId={} reason={}",
                             todo.getId(), be.getMessage());
                     LlmDecisionOutcome fallback = tryPlainTextFallbackForFileWrite(
-                            "file_write", candidates, todo, state, be);
+                            reqName, candidates, todo, state, be);
                     if (fallback != null) {
                         return fallback;
                     }
@@ -789,10 +973,11 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         if (be == null || be.getMessage() == null) return false;
         String msg = be.getMessage();
         // 匹配 validateToolArgs 中抛出的所有 HTML 质量审计类错误，立即触发纯文本回退
-        return msg.contains("file_write content 参数缺失")
-                || msg.contains("file_write content 长度异常")
-                || msg.contains("file_write content 含占位符")
-                || msg.contains("file_write content HTML 结构不完整");
+        // 同时覆盖 file_write（content 字段）和 file_write_chunk（chunk 字段）两条路径
+        return msg.contains("参数缺失")
+                || msg.contains("长度异常")
+                || msg.contains("含占位符")
+                || msg.contains("HTML 结构不完整");
     }
 
     /**
@@ -820,14 +1005,20 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                                                                 TodoItem todo,
                                                                 DeepAgentState state,
                                                                 Throwable cause) {
-        if (!"file_write".equals(toolName)) {
-            return null;  // 其他工具暂不支持纯文本回退
+        // 支持 file_write 和 file_write_chunk 两条路径的纯文本回退
+        // 设计：file_write_chunk 是 design profile 的主路径，但 function calling JSON 嵌 HTML
+        // 经常因引号转义 / token 上限产生残缺 chunk——回退到纯文本直出可绕开这些问题
+        boolean isFileWrite = "file_write".equals(toolName);
+        boolean isFileWriteChunk = "file_write_chunk".equals(toolName);
+        if (!isFileWrite && !isFileWriteChunk) {
+            return null;
         }
+        final String targetToolName = isFileWrite ? "file_write" : "file_write_chunk";
         Optional<ToolProvider> fileWriteOpt = candidates.stream()
-                .filter(t -> "file_write".equals(t.name()))
+                .filter(t -> targetToolName.equals(t.name()))
                 .findFirst();
         if (fileWriteOpt.isEmpty()) {
-            log.warn("ToolNode: file_write 纯文本回退跳过——候选工具中无 file_write");
+            log.warn("ToolNode: {} 纯文本回退跳过——候选工具中无 {}", targetToolName, targetToolName);
             return null;
         }
         ToolProvider fileWriteTool = fileWriteOpt.get();
@@ -835,14 +1026,18 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         // 静默：内部过渡通知，不发 SSE（避免前端噪音）
         // 前端只会看到 fallback_success 的「文件已生成」(TOOL_CALL) 或最终失败
         // 仅后端日志保留，用于调试
-        log.info("ToolNode: file_write 切换纯文本直出模式（function-call 失败，正在重新生成）. todoId={} reason={}",
-                todo.getId(), cause == null ? "null" : cause.getMessage());
+        log.info("ToolNode: {} 切换纯文本直出模式（function-call 失败，正在重新生成）. todoId={} reason={}",
+                targetToolName, todo.getId(), cause == null ? "null" : cause.getMessage());
 
         // 构造 fallback args：保留 filename（若 LLM 上一轮给过）
         Map<String, Object> fallbackArgs = new HashMap<>();
         String desc = todo.getDescription() == null ? "" : todo.getDescription();
         fallbackArgs.put("todo_description", desc);
         fallbackArgs.put("instructions", state.instructions());
+        // file_write_chunk 单次模式必需字段
+        if (isFileWriteChunk) {
+            fallbackArgs.put("mode", "write");
+        }
         // filename 兜底：从 TODO 描述提取 .html 文件名
         java.util.regex.Matcher fnMatcher = java.util.regex.Pattern.compile(
                 "([\\w\\-]+\\.html?)", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(desc);
@@ -866,8 +1061,15 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         }
 
         try {
+            // file_write_chunk 用 chunk 字段，file_write 用 content 字段
+            // generateContentByPlainText 内部把生成结果写入 "content" 字段，
+            // 此处对 file_write_chunk 路径在调用前把字段名映射好（在 generateContentByPlainText 之后修正）
             Map<String, Object> toolResult = generateContentByPlainText(
                     fileWriteTool, fallbackArgs, state, todo);
+            // file_write_chunk 字段名修正：把 content 复制到 chunk（工具实际读取 chunk）
+            if (isFileWriteChunk && fallbackArgs.containsKey("content")) {
+                fallbackArgs.put("chunk", fallbackArgs.get("content"));
+            }
             // 回退成功：把执行结果透传到 outcome，外层 apply 会调用 handleFileWriteSideEffect
             LlmDecisionOutcome o = new LlmDecisionOutcome();
             o.chosen = fileWriteTool;
@@ -935,19 +1137,31 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         }
 
         // 3. 从响应文本提取 HTML（复用 rescueContentFromText 的提取规则，借助临时 args）
+        // 优先解析 <artifact> 标签（open-design 模式，主路径）；退回 ```html / <!DOCTYPE> 等老规则
         Map<String, Object> rescueArgs = new HashMap<>(originalArgs);
         rescueArgs.remove("content");  // 确保兜底逻辑真正执行
-        rescueContentFromText("file_write", rescueArgs, rawText);
+        String rescueToolName = fileWriteTool.name();  // file_write 或 file_write_chunk
+        rescueContentFromText(rescueToolName, rescueArgs, rawText);
         Object rescued = rescueArgs.get("content");
         if (rescued == null || rescued.toString().isBlank()) {
-            log.error("ToolNode: file_write 纯文本回退失败，无法从 LLM 文本中提取 HTML（文本长度={}）", rawText.length());
+            log.error("ToolNode: {} 纯文本回退失败，无法从 LLM 文本中提取 HTML（文本长度={}）",
+                    rescueToolName, rawText.length());
             throw new com.hypersense.boot.common.exception.BusinessException(
-                    "file_write 纯文本回退失败：LLM 文本中未包含有效 HTML（从 <!DOCTYPE html> 到 </html>）");
+                    rescueToolName + " 纯文本回退失败：LLM 文本未包含 <artifact> 标签或有效 HTML");
+        }
+        // 若 artifact 标签带了 path，filename 可能已被 rescue 更新——同步回 originalArgs 供后续 execArgs 使用
+        if (rescueArgs.get("filename") != null) {
+            originalArgs.put("filename", rescueArgs.get("filename"));
         }
 
         // 4. 塞回 args 并调用 FileWriteTool 执行
         Map<String, Object> execArgs = new HashMap<>(originalArgs);
         execArgs.put("content", rescued);
+        // file_write_chunk 工具契约读 chunk 字段（虽然 FileWriteChunkTool pickString 会兜底 content，
+        // 此处显式同步以保持字段一致性，避免依赖隐式 fallback）
+        if ("file_write_chunk".equals(rescueToolName)) {
+            execArgs.put("chunk", rescued);
+        }
         String sessionId = state.sessionId();
         if (sessionId != null && !sessionId.isBlank()) {
             execArgs.put("sessionId", sessionId);
@@ -971,25 +1185,35 @@ public class ToolNode implements NodeAction<DeepAgentState> {
     }
 
     /**
-     * 纯文本回退路径的 system prompt：约束 LLM 直接输出 HTML，禁止任何解释/markdown 包裹。
+     * 纯文本回退路径的 system prompt：约束 LLM 用 &lt;artifact&gt; 标签输出 HTML（open-design 模式）。
+     * <p>open-design 模式核心：用 XML 风格的 {@code <artifact path="xxx.html">...</artifact>}
+     * 包裹完整 HTML，绕开 JSON 函数调用的转义与 token 上限问题——这是 design profile 的主路径。</p>
      */
     private String buildPlainTextFallbackSystemPrompt() {
-        return "【强制输出格式 - 严格遵守】\n" +
-                "你是 HTML 生成器，唯一职责是输出完整可运行的 HTML 文档。\n\n" +
+        return "【强制输出格式 - artifact 模式（严格遵守）】\n" +
+                "你是 HTML 生成器，唯一职责是用 <artifact> 标签输出完整可运行的 HTML 文档。\n\n" +
+                "输出格式（必须严格遵守）：\n" +
+                "<artifact path=\"文件名.html\">\n" +
+                "<!DOCTYPE html>\n" +
+                "... 完整 HTML 内容 ...\n" +
+                "</artifact>\n\n" +
                 "硬性规则（违反任何一条即视为失败）：\n" +
-                "1. 第一行第一字符必须是 '<'，即 <!DOCTYPE html> 必须出现在响应的最开头\n" +
-                "2. 严禁输出任何礼貌用语：「好的」「我来」「请稍等」「以下」「为您」「根据您的要求」等\n" +
-                "3. 严禁使用 markdown 代码块包裹（禁止使用 ```html 或 ```）\n" +
-                "4. 严禁输出任何解释、思考、说明、前言、后语\n" +
-                "5. 响应必须以 </html> 结尾，</html> 之后不得有任何字符\n" +
-                "6. 所有 CSS 必须内联在 <style> 标签内，所有 JS 必须内联在 <script> 标签内\n" +
-                "7. 禁止引用外部资源（除 CDN：tailwindcss、bootstrap、three.js 等允许）\n\n" +
+                "1. 整个响应必须且仅能包含一个 <artifact>...</artifact> 块\n" +
+                "2. <artifact> 标签必须带 path 属性（值为文件名，如 landing.html）\n" +
+                "3. <artifact> 内部第一行必须是 <!DOCTYPE html>\n" +
+                "4. <artifact> 内部最后必须以 </html> 结尾，</artifact> 之后不得有任何字符\n" +
+                "5. 严禁输出任何礼貌用语：「好的」「我来」「请稍等」「以下」「为您」「根据您的要求」等\n" +
+                "6. 严禁使用 markdown 代码块包裹（禁止使用 ```html 或 ```）\n" +
+                "7. 严禁输出任何解释、思考、说明、前言、后语\n" +
+                "8. 所有 CSS 必须内联在 <style> 标签内，所有 JS 必须内联在 <script> 标签内\n" +
+                "9. 禁止引用外部资源（除 CDN：tailwindcss、bootstrap、three.js 等允许）\n\n" +
                 "技术规范：\n" +
                 "- HTML5 语义化标签\n" +
                 "- 移动端响应式（含 viewport meta）\n" +
                 "- 现代视觉风格（柔和阴影、合理留白、对比鲜明的配色）\n" +
-                "- 完整页面结构：header/nav/main/section/footer\n\n" +
-                "禁止思考、禁止解释、禁止前言。直接输出 <!DOCTYPE html> 开头的完整 HTML。";
+                "- 完整页面结构：header/nav/main/section/footer\n" +
+                "- HTML 体量控制在 6K tokens / ~24KB 以内（CSS ≤ 200 行，body ≤ 300 行）\n\n" +
+                "禁止思考、禁止解释、禁止前言。直接输出 <artifact path=\"page.html\"> 开头、</artifact> 结尾的完整内容。";
     }
 
     /**
@@ -1025,7 +1249,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
             }
         }
 
-        sb.append("请直接输出完整的 HTML 文档（从 <!DOCTYPE html> 开始）:");
+        sb.append("请用 <artifact path=\"page.html\">...</artifact> 标签输出完整 HTML（path 用任务描述中的文件名，没有就用 page.html）:");
         return sb.toString();
     }
 
@@ -1039,7 +1263,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         dev.langchain4j.model.chat.request.ChatRequest req = dev.langchain4j.model.chat.request.ChatRequest.builder()
                 .messages(messages)
                 // 注意：不带 .toolSpecifications(...)，绕开 function calling
-                .maxOutputTokens(8192)
+                .maxOutputTokens(LLM_MAX_OUTPUT_TOKENS)
                 .build();
         // 主线程捕获事件消费者（langchain4j 流式回调在 HTTP 线程，ThreadLocal 拿不到）
         final java.util.function.Consumer<AgentEvent> eventConsumer = SubAgentEventBus.get();
@@ -1071,11 +1295,6 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         try {
             ChatResponse resp = future.get(10, java.util.concurrent.TimeUnit.MINUTES);
             return resp.aiMessage().text();
-        } catch (java.util.concurrent.TimeoutException te) {
-            future.cancel(true);
-            log.error("ToolNode: 纯文本回退流式调用超时（10 分钟），已 cancel: {}", te.getMessage(), te);
-            throw new com.hypersense.boot.common.exception.BusinessException(
-                    "file_write 纯文本回退流式调用超时");
         } catch (Exception e) {
             future.cancel(true);
             log.error("ToolNode: 纯文本回退流式调用失败: {}", e.getMessage(), e);
@@ -1090,7 +1309,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
     private String callLlmSyncForPlainText(List<ChatMessage> messages) {
         ChatResponse resp = chatModel.chat(ChatRequest.builder()
                 .messages(messages)
-                .maxOutputTokens(8192)
+                .maxOutputTokens(LLM_MAX_OUTPUT_TOKENS)
                 .build());
         return resp.aiMessage().text();
     }
@@ -1158,10 +1377,19 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         return sb.toString();
     }
 
-    /** file_write 成功时把 content 落盘到 files 通道 */
+    /** file_write / file_write_chunk / file_render 成功时把 content 落盘到 files 通道，并发 FILE_CREATED 事件 */
     private void handleFileWriteSideEffect(ToolProvider tool, Object result, DeepAgentState state,
                                            TodoItem todo, Map<String, String> files) {
-        if (!"file_write".equals(tool.name()) || !(result instanceof Map)) {
+        // #12 修复：file_write_chunk 与 file_write 同走文件副作用处理
+        // file_render：PPT 渲染主路径，产物为 slide_<n>.html + index.html，逐文件发 FILE_CREATED
+        String toolName = tool.name();
+        boolean isFileWrite = "file_write".equals(toolName) || "file_write_chunk".equals(toolName);
+        boolean isFileRender = "file_render".equals(toolName);
+        if ((!isFileWrite && !isFileRender) || !(result instanceof Map)) {
+            return;
+        }
+        if (isFileRender) {
+            handleFileRenderSideEffect(tool, (Map<String, Object>) result, state);
             return;
         }
         @SuppressWarnings("unchecked")
@@ -1210,26 +1438,301 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         }
     }
 
+    /**
+     * file_render 产物副作用：逐文件发 FILE_CREATED 事件（方案 A）。
+     * <p>file_render 一次产 N 个 slide_<n>.html + 1 个 index.html。每个文件单独发事件，
+     * 前端可按 filename 自然去重/追加；前端已做存在性判断，无新增字段也能兼容。</p>
+     * <p>路径契约与 FileWriteTool 对齐：relativePath={sessionId}/{filename}（file_render 无 uploads 子目录），
+     * workspacePath=workspace/{relativePath}。outputDir 透传到 path 字段供后端调试。</p>
+     */
+    private void handleFileRenderSideEffect(ToolProvider tool, Map<String, Object> resultMap,
+                                            DeepAgentState state) {
+        if (!Boolean.TRUE.equals(resultMap.get("success"))) {
+            return;
+        }
+        Object filesObj = resultMap.get("files");
+        if (!(filesObj instanceof List<?> list) || list.isEmpty()) {
+            return;
+        }
+        String sessionId = state.sessionId();
+        if (sessionId == null || sessionId.isBlank()) {
+            sessionId = String.valueOf(resultMap.getOrDefault("sessionId", "default"));
+        }
+        Object outputDir = resultMap.get("outputDir");
+        for (Object fn : list) {
+            if (!(fn instanceof String filename) || filename.isBlank()) continue;
+            String relativePath = sessionId + "/" + filename;
+            String workspacePath = "workspace/" + relativePath;
+            try {
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("filename", filename);
+                payload.put("path", outputDir);
+                payload.put("relativePath", relativePath);
+                payload.put("workspacePath", workspacePath);
+                payload.put("sessionId", sessionId);
+                payload.put("sourceTool", "file_render");
+                emit(AgentEventType.FILE_CREATED, "文件已创建: " + filename, payload);
+            } catch (Exception ignored) {
+                // SSE 失败不影响主流程
+            }
+        }
+    }
+
     /** 构造 TOOL_CALL 事件的 data，新增 toolName/arguments 字段 */
     private Map<String, Object> buildCallData(TodoItem todo, List<ToolProvider> candidates,
                                               ToolProvider chosen, Map<String, Object> args,
                                               boolean matched, String reason) {
         Map<String, Object> data = new HashMap<>();
         data.put("todo", todo);
-        data.put("tools", candidates.stream().map(ToolProvider::name).toList());
+        // 候选工具列表：tools（旧字段，向后兼容）+ candidates（前端 ProcessPanel 新契约）
+        List<String> candidateNames = candidates.stream().map(ToolProvider::name).toList();
+        data.put("tools", candidateNames);
+        data.put("candidates", candidateNames);
         data.put("matched", matched);
         if (chosen != null) {
+            // 选中工具：toolName（旧字段）+ selected（前端新契约）
             data.put("toolName", chosen.name());
+            data.put("selected", chosen.name());
+            // 参数：arguments（旧字段）+ args（前端新契约）
             data.put("arguments", args);
-            // file_write 时透传 fileName 给前端切设计模式（前端 useAgentSSE 匹配此字段）
-            if ("file_write".equals(chosen.name()) && args.get("filename") instanceof String fn && !fn.isBlank()) {
+            data.put("args", args);
+            // file_write / file_write_chunk / file_render 时透传 fileName 给前端切设计模式（前端 useAgentSSE 匹配此字段）
+            String cn = chosen.name();
+            if (("file_write".equals(cn) || "file_write_chunk".equals(cn) || "file_render".equals(cn))
+                    && args.get("filename") instanceof String fn && !fn.isBlank()) {
                 data.put("fileName", fn);
             }
         }
+        // reason：LLM function calling 模式通常不返回 reasoning，此处为 null 时省略（前端隐藏"选中原因"块）
         if (reason != null) {
             data.put("reason", reason);
         }
         return data;
+    }
+
+    /**
+     * Plan C P0#1：工具执行后推进 TDD 状态机（code-profile 专用）。
+     * <p>逻辑与 {@link ExecuteNode#onToolExecuted} 一致：file_write 推 READ→TEST→TEST_HITL→IMPL→EXEC
+     * 并抽取源码 import 注册到 SymbolRegistry；sandbox_exec 推 EXEC→LINT。非 code-profile / 未注入
+     * 管理器时静默跳过。</p>
+     */
+    private void advanceTddPhase(DeepAgentState state, String toolName, Object result) {
+        if (state == null || toolName == null) return;
+        if (tddPhaseManager == null || symbolRegistry == null) return;
+        String activeProfileId = state.<String>value(DeepAgentState.ACTIVE_PROFILE).orElse(null);
+        if (!"code".equals(activeProfileId)) return;
+        String sessionId = state.<String>value(DeepAgentState.SESSION_ID).orElse("__default__");
+
+        try {
+            com.hypersense.boot.framework.agents.profile.impl.TddPhase cur =
+                    tddPhaseManager.current(sessionId);
+            if ("file_write".equals(toolName)) {
+                switch (cur) {
+                    case READ -> tddPhaseManager.transition(sessionId,
+                            com.hypersense.boot.framework.agents.profile.impl.TddPhase.TEST);
+                    case TEST -> tddPhaseManager.transition(sessionId,
+                            com.hypersense.boot.framework.agents.profile.impl.TddPhase.TEST_HITL);
+                    case IMPL -> tddPhaseManager.transition(sessionId,
+                            com.hypersense.boot.framework.agents.profile.impl.TddPhase.EXEC);
+                    default -> { /* 其他阶段不因 file_write 推进 */ }
+                }
+                Map<String, Object> resultMap = (result instanceof Map<?, ?>) ? castToObjMap(result) : null;
+                registerImportsFromCode(extractFileContent(resultMap), sessionId);
+            } else if ("sandbox_exec".equals(toolName)) {
+                if (cur == com.hypersense.boot.framework.agents.profile.impl.TddPhase.EXEC) {
+                    tddPhaseManager.transition(sessionId,
+                            com.hypersense.boot.framework.agents.profile.impl.TddPhase.LINT);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("ToolNode.advanceTddPhase: 推进 TDD 阶段失败 tool={}, session={}, err={}",
+                    toolName, sessionId, e.getMessage());
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> castToObjMap(Object o) {
+        return (Map<String, Object>) o;
+    }
+
+    /** 从工具结果 Map 中提取写盘内容（FileWriteTool 的产物）。无则返回 null。 */
+    private String extractFileContent(Map<String, Object> toolResult) {
+        if (toolResult == null) return null;
+        Object content = toolResult.get("content");
+        if (content == null) content = toolResult.get("text");
+        return content == null ? null : content.toString();
+    }
+
+    /**
+     * 抽取源码 import 并注册到 SymbolRegistry（防 LLM 用 package_lookup 之外的 API）。
+     * <p>规则与 {@link ExecuteNode} 同名私有方法保持一致，确保两条执行路径（LLM 决策 / 旧遍历）
+     * 都能覆盖。</p>
+     */
+    private void registerImportsFromCode(String code, String sessionId) {
+        if (code == null || code.isBlank()) return;
+        // Python
+        java.util.regex.Pattern pyImport = java.util.regex.Pattern.compile(
+                "(?m)^\\s*(?:from\\s+([\\w.]+)\\s+import\\s+(\\w+)|import\\s+([\\w.]+))\\s*$");
+        java.util.regex.Matcher m = pyImport.matcher(code);
+        while (m.find()) {
+            if (m.group(2) != null && !m.group(2).isEmpty()) {
+                symbolRegistry.register(sessionId, m.group(2));
+            }
+            if (m.group(3) != null && !m.group(3).isEmpty()) {
+                String[] parts = m.group(3).split("\\.");
+                if (parts.length > 1) {
+                    symbolRegistry.register(sessionId, parts[parts.length - 1]);
+                }
+            }
+        }
+        // JS
+        java.util.regex.Pattern jsImport = java.util.regex.Pattern.compile(
+                "import\\s+[^;]*?\\{([^}]+)\\}\\s*from\\s+['\"][^'\"]+['\"]");
+        java.util.regex.Matcher jm = jsImport.matcher(code);
+        while (jm.find()) {
+            for (String s : jm.group(1).split(",")) {
+                String sym = s.trim().split("\\s+as\\s+")[0].trim();
+                if (!sym.isEmpty()) symbolRegistry.register(sessionId, sym);
+            }
+        }
+    }
+
+    /**
+     * Plan C P0#2：file_write/file_render/sandbox_exec 后扫描 profile.lintRules()，
+     * 命中违规时累加 session 级计数器并发 LINT_VIOLATION 事件。
+     *
+     * <p>违规累计超 {@code profile.hitlPolicy().maxLintRetriesBeforeInterrupt()} 时
+     * 返回中断理由字符串（用于在 {@link #apply} 末尾写 state.INTERRUPT_REASON），
+     * 同时发 INTERRUPT 事件。code-profile 还会调 {@code tddPhaseManager.failLint}。</p>
+     *
+     * <p>非 profile / 无 lintRules / 工具不在扫描范围 → 静默返回 null。
+     * 任何异常吞掉 + log.warn，绝不阻塞主流程。</p>
+     *
+     * @return 中断理由（用于 NEED_CONFIRMATION）；未触发中断时返回 null
+     */
+    private String runProfileLint(DeepAgentState state, String toolName, Object result, TodoItem todo) {
+        if (state == null || toolName == null) return null;
+        // 仅对产物型工具扫描 lint：file_write/file_render（HTML/源码）、sandbox_exec（已携带 compile/test 语义）
+        if (!"file_write".equals(toolName)
+                && !"file_render".equals(toolName)
+                && !"sandbox_exec".equals(toolName)) {
+            return null;
+        }
+        if (profileRegistry == null) return null;
+        String activeProfileId = state.<String>value(DeepAgentState.ACTIVE_PROFILE).orElse(null);
+        if (activeProfileId == null || activeProfileId.isBlank()) return null;
+
+        com.hypersense.boot.framework.agents.profile.CapabilityProfile profile;
+        try {
+            String sid = state.<String>value(DeepAgentState.SESSION_ID).orElse(null);
+            java.util.Map<String, Object> hints = state.<java.util.Map<String, Object>>value(DeepAgentState.PROFILE_HINTS).orElse(java.util.Map.of());
+            profile = profileRegistry.get(activeProfileId, sid, hints);
+        } catch (Exception e) {
+            log.warn("ToolNode.runProfileLint: 加载 profile [{}] 失败: {}", activeProfileId, e.getMessage());
+            return null;
+        }
+        if (profile == null) return null;
+        java.util.List<com.hypersense.boot.framework.agents.profile.LintRule> rules = profile.lintRules();
+        if (rules == null || rules.isEmpty()) return null;
+
+        String content = extractLintTarget(toolName, result);
+        if (content == null || content.isBlank()) {
+            log.debug("ToolNode.runProfileLint: tool={} 无可扫内容，跳过 lint", toolName);
+            return null;
+        }
+
+        String sessionId = state.<String>value(DeepAgentState.SESSION_ID).orElse("__default__");
+        com.hypersense.boot.framework.agents.profile.HitlPolicy policy = profile.hitlPolicy();
+        int maxRetries = policy == null ? Integer.MAX_VALUE : policy.maxLintRetriesBeforeInterrupt();
+        if (maxRetries <= 0) maxRetries = Integer.MAX_VALUE;  // 0 / 负值表示不触发 HITL
+
+        boolean anyViolated = false;
+        for (com.hypersense.boot.framework.agents.profile.LintRule rule : rules) {
+            String violation;
+            try {
+                violation = rule.check(content);
+            } catch (Exception e) {
+                log.warn("ToolNode.runProfileLint: rule={} 检查异常: {}", rule.id(), e.getMessage());
+                continue;
+            }
+            if (violation == null || violation.isBlank()) continue;
+            anyViolated = true;
+            int attempt = lintStatsManager == null ? 0 : lintStatsManager.increment(sessionId, rule.id());
+            boolean willInterrupt = attempt >= maxRetries;
+            emitLintViolation(rule, violation, content, toolName, sessionId, attempt, willInterrupt, todo);
+            log.info("ToolNode.runProfileLint: 命中 rule={} tool={} attempt={}/{} willInterrupt={}",
+                    rule.id(), toolName, attempt, maxRetries == Integer.MAX_VALUE ? "∞" : maxRetries, willInterrupt);
+        }
+
+        if (!anyViolated) return null;
+
+        // code-profile：把 lint 失败推进 TDD 状态机（IMPL/LINT → 回 IMPL 等待 retry / 或 HITL）
+        if (tddPhaseManager != null && "code".equals(activeProfileId)) {
+            try {
+                tddPhaseManager.failLint(sessionId);
+            } catch (Exception e) {
+                log.warn("ToolNode.runProfileLint: tddPhaseManager.failLint 失败: {}", e.getMessage());
+            }
+        }
+
+        int totalViolations = lintStatsManager == null ? 0 : lintStatsManager.total(sessionId);
+        if (totalViolations >= maxRetries) {
+            String reason = String.format(
+                    "Lint 违规累计 %d 次 ≥ 阈值 %d，触发 HITL 等待审批。profile=%s",
+                    totalViolations, maxRetries, activeProfileId);
+            try {
+                Map<String, Object> payload = new HashMap<>();
+                payload.put("sessionId", sessionId);
+                payload.put("todoId", todo == null ? null : todo.getId());
+                payload.put("profile", activeProfileId);
+                payload.put("tool", toolName);
+                payload.put("totalViolations", totalViolations);
+                payload.put("maxRetries", maxRetries);
+                payload.put("phase", "lint_failed");
+                emit(AgentEventType.INTERRUPT, reason, payload);
+            } catch (Exception ignored) {}
+            return reason;
+        }
+        return null;
+    }
+
+    /**
+     * 从工具结果中提取 lint 扫描目标文本。
+     * <p>file_write/file_render → content 字段；sandbox_exec → stdout（用于反幻觉 API / 注释语言 lint）。</p>
+     */
+    private String extractLintTarget(String toolName, Object result) {
+        if (!(result instanceof Map<?, ?>)) return null;
+        @SuppressWarnings("unchecked")
+        Map<String, Object> m = (Map<String, Object>) result;
+        Object content = m.get("content");
+        if (content == null) content = m.get("text");
+        if (content == null) content = m.get("stdout");
+        if (content == null) content = m.get("html");
+        return content == null ? null : content.toString();
+    }
+
+    /** 发送 LINT_VIOLATION 事件，附带规则元信息与命中片段（截断 200 字防止 SSE 膨胀）。 */
+    private void emitLintViolation(com.hypersense.boot.framework.agents.profile.LintRule rule,
+                                   String message, String content, String toolName,
+                                   String sessionId, int attempt, boolean willInterrupt,
+                                   TodoItem todo) {
+        try {
+            String snippet = content == null ? "" : content.substring(0, Math.min(200, content.length()));
+            Map<String, Object> payload = new HashMap<>();
+            payload.put("ruleId", rule.id());
+            payload.put("description", rule.description());
+            payload.put("message", message);
+            payload.put("snippet", snippet);
+            payload.put("sessionId", sessionId);
+            payload.put("toolName", toolName);
+            payload.put("attempt", attempt);
+            payload.put("willInterrupt", willInterrupt);
+            if (todo != null) payload.put("todoId", todo.getId());
+            emit(AgentEventType.LINT_VIOLATION,
+                    "Lint 违规 [" + rule.id() + "]: " + message, payload);
+        } catch (Exception ignored) {
+            // SSE 失败不影响主流程
+        }
     }
 
     /** LLM 决策结果载体 */
@@ -1301,6 +1804,62 @@ public class ToolNode implements NodeAction<DeepAgentState> {
         } catch (Throwable t) {
             // 流式回调异常绝不能影响主流程，仅记录
             log.warn("ToolNode: CODE_STREAMING emit 失败（忽略）: {}", t.getMessage());
+        }
+    }
+
+    /**
+     * Plan #1：function calling 路径下 file_write / file_write_chunk 补发一次 CODE_STREAMING。
+     * <p>背景：function calling 模式 LLM 把内容塞 tool args，{@code onPartialResponse} 通常不回调，
+     * 前端在「LLM 决策完成 → 工具执行 → TOOL_CALL 事件」之间收不到任何代码增量。</p>
+     * <p>策略：若 accumulator 为空（即纯文本回退路径未发过），把 content / chunk 字段整体
+     * 作为 accumulated 推送一次（前端 MessageMarkdown 覆盖式渲染，单次推送无闪烁）。
+     * accumulator 非空时跳过（去重，避免与 onPartialResponse 重复）。</p>
+     *
+     * @param consumer   主线程事件消费者
+     * @param accumulator 流式累积 buffer（用于判断是否已被纯文本路径发过）
+     * @param todoId     TODO id
+     * @param todoDesc   TODO 描述
+     * @param sessionId  会话 id
+     * @param toolName   选中工具名（file_write / file_write_chunk）
+     * @param args       工具参数（含 content 或 chunk 字段）
+     */
+    private void emitCodeStreamingForFileWriteOnce(
+            java.util.function.Consumer<AgentEvent> consumer,
+            StringBuilder accumulator,
+            String todoId, String todoDesc, String sessionId,
+            String toolName, java.util.Map<String, Object> args) {
+        if (consumer == null || args == null) return;
+        if (!"file_write".equals(toolName) && !"file_write_chunk".equals(toolName)) return;
+        // 纯文本回退路径已 emit 过，跳过
+        if (accumulator.length() > 0) return;
+        Object contentObj = "file_write_chunk".equals(toolName)
+                ? args.get("chunk")
+                : args.get("content");
+        if (contentObj == null) {
+            // file_write_chunk 可能也用 content 字段（pickString 兜底）
+            if ("file_write_chunk".equals(toolName)) contentObj = args.get("content");
+        }
+        String content = contentObj == null ? null : contentObj.toString();
+        if (content == null || content.isEmpty()) return;
+        // 把内容并入 accumulator，标记已 emit（后续若还有路径不会再发）
+        accumulator.append(content);
+        try {
+            java.util.Map<String, Object> data = new java.util.HashMap<>();
+            data.put("todoId", todoId);
+            data.put("todoDescription", todoDesc);
+            if (sessionId != null) data.put("sessionId", sessionId);
+            // 单次推送：delta 与 accumulated 一致（前端按 accumulated 覆盖渲染）
+            data.put("delta", content);
+            data.put("accumulated", content);
+            AgentEvent event = AgentEvent.builder()
+                    .type(AgentEventType.CODE_STREAMING)
+                    .message("生成代码中...")
+                    .data(data)
+                    .timestamp(System.currentTimeMillis())
+                    .build();
+            consumer.accept(event);
+        } catch (Throwable t) {
+            log.warn("ToolNode: file_write CODE_STREAMING 补发失败（忽略）: {}", t.getMessage());
         }
     }
 
@@ -1459,9 +2018,253 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                     return true;
                 }
                 return desc.contains("文件") || desc.contains("产物") || desc.contains("输出文件");
+            case "file_write_chunk":
+                // 分块写大文件（design/profile 自由 HTML 落盘的默认路径）
+                // 显式提到 file_write_chunk 命中；复用 file_write 的「保存/写文件/落盘/导出」语义
+                if (desc.contains("file_write_chunk") || desc.contains("file-write-chunk")
+                        || desc.contains("分块") || desc.contains("chunk")) {
+                    return true;
+                }
+                return desc.contains("写入") || desc.contains("写文件") || desc.contains("保存")
+                        || desc.contains("创建文件") || desc.contains("新建文件")
+                        || desc.contains("生成") || desc.contains("导出") || desc.contains("输出")
+                        || desc.contains("另存为") || desc.contains("落盘") || desc.contains("归档")
+                        || desc.contains("save") || desc.contains("write") || desc.contains("export")
+                        || desc.matches(".*\\.(md|markdown|txt|csv|json|py|js|ts|html|htm|css|java|c|cpp|go|rs|docx|doc|xlsx|xls|pdf|xml|yaml|yml|log|sql|sh|bat)\\b.*");
+            case "file_render":
+                // PPT / 幻灯片模板渲染（design-profile slides JSON → slide_N.html）
+                return desc.contains("file_render") || desc.contains("渲染")
+                        || desc.contains("slides") || desc.contains("deck")
+                        || desc.contains("ppt") || desc.contains("幻灯片")
+                        || desc.contains("演示文稿") || desc.contains("keynote");
+            case "design_asset_fetch":
+                // 抓官方 logo / 真图（svgl/simpleicons/wikimedia）
+                return desc.contains("design_asset_fetch") || desc.contains("抓取")
+                        || desc.contains("取 logo") || desc.contains("取资产")
+                        || desc.contains("品牌资产") || desc.contains("官方 logo")
+                        || desc.contains("取真图") || desc.contains("wikimedia")
+                        || desc.contains("unsplash") || desc.contains("simpleicons");
+            case "design_direction_explore":
+                // 3 份 outline 探索方向（roulette / reference / designer 三套互补逻辑）
+                return desc.contains("design_direction_explore")
+                        || desc.contains("outline") || desc.contains("探索方向")
+                        || desc.contains("风格方向") || desc.contains("方向探索")
+                        || desc.contains("3 份") || desc.contains("三份")
+                        || desc.contains("variation") || desc.contains("变体");
             default:
                 return false;
         }
+    }
+
+    /**
+     * 判断 TODO 是否显式声明走 reply_text（短路条件）。
+     * <p>仅当 PlanNode 已契约化生成「使用 reply_text 工具...」类 TODO 时才短路，
+     * 避免对其他可能命中 reply_text 关键词的回复类 TODO 误触发（那些仍可走 LLM 决策）。</p>
+     */
+    private boolean isReplyTextTodo(String todoDescription) {
+        if (todoDescription == null) return false;
+        String desc = todoDescription.toLowerCase();
+        return desc.contains("reply_text");
+    }
+
+    /**
+     * 判断是否为「design profile + HTML 类 TODO」需主动短路纯文本 artifact 模式。
+     * <p>命中条件（全部满足）：</p>
+     * <ol>
+     *   <li>active profile == "design"</li>
+     *   <li>候选工具含 file_write_chunk</li>
+     *   <li>TODO 描述含 HTML 关键词（不区分大小写）：
+     *       <code>.html</code> / <code>html</code> / <code>landing</code> /
+     *       <code>主页</code> / <code>首页</code> / <code>页面</code> /
+     *       <code>信息图</code> / <code>infographic</code></li>
+     * </ol>
+     * <p>命中后 apply 会跳过 function calling 决策直接走纯文本流式输出，失败自动降级。</p>
+     */
+    private boolean isDesignHtmlTodo(DeepAgentState state, TodoItem todo, List<ToolProvider> candidates) {
+        if (state == null || todo == null || candidates == null || candidates.isEmpty()) {
+            return false;
+        }
+        String profileId = state.<String>value(DeepAgentState.ACTIVE_PROFILE).orElse("");
+        if (!"design".equals(profileId)) {
+            return false;
+        }
+        boolean hasFileWriteChunk = candidates.stream().anyMatch(t -> "file_write_chunk".equals(t.name()));
+        if (!hasFileWriteChunk) {
+            return false;
+        }
+        String desc = todo.getDescription();
+        if (desc == null || desc.isBlank()) {
+            return false;
+        }
+        String lower = desc.toLowerCase();
+        return lower.contains(".html")
+                || lower.contains("html")
+                || lower.contains("landing")
+                || lower.contains("infographic")
+                || desc.contains("主页")
+                || desc.contains("首页")
+                || desc.contains("页面")
+                || desc.contains("信息图");
+    }
+
+    /**
+     * reply_text 纯文本直出：绕开 function-calling 决策，让 LLM 以普通 chat 直出回复文本。
+     * <p>背景：function-calling 模式下 LLM 把内容塞 tool args，onPartialResponse 不回调，
+     * HTTP 主线程在 future.get(10, MINUTES) 同步阻塞，SSE 缓冲区无法 flush，前端"卡死直到服务关闭"。
+     * reply_text 是文本回显通道（无"工具选择"语义），用普通 chat 几秒返回短文本即可。</p>
+     * <p>失败时返回 null，外层降级到原有 LLM 决策路径（保证兼容性）。</p>
+     */
+    private LlmDecisionOutcome tryPlainTextForReplyText(List<ToolProvider> candidates,
+                                                         TodoItem todo, DeepAgentState state) {
+        Optional<ToolProvider> replyOpt = candidates.stream()
+                .filter(t -> "reply_text".equals(t.name()))
+                .findFirst();
+        if (replyOpt.isEmpty()) {
+            return null;
+        }
+        ToolProvider replyTool = replyOpt.get();
+
+        // 构造普通 chat prompt（不带 toolSpecifications）
+        String systemPrompt = "你是用户回复助手。根据当前 TODO、用户原始需求和前序步骤产出，"
+                + "生成一段面向用户的纯文本回复（可含 Markdown）。\n"
+                + "硬性规则：\n"
+                + "1. 直接输出回复正文，禁止任何前言、解释、思考链\n"
+                + "2. 禁止编造文件路径、工具调用记录等操作痕迹\n"
+                + "3. 回复内容必须与 TODO 主题一致（如 TODO 是总结，则输出总结；TODO 是问候，则输出问候）\n"
+                + "4. 长度控制：问候/澄清 ≤ 200 字；解释/总结 ≤ 800 字";
+        StringBuilder userPromptBuf = new StringBuilder();
+        userPromptBuf.append("当前任务: ").append(todo.getDescription() == null ? "" : todo.getDescription()).append("\n\n");
+        String instructions = state.instructions() == null ? "" : state.instructions();
+        userPromptBuf.append("用户原始需求:\n").append(instructions).append("\n\n");
+        // 前序 TODO 产出（让总结类回复有内容可依）
+        List<TodoItem> todos = state.todos();
+        if (todos != null && !todos.isEmpty()) {
+            int stepIdx = 0;
+            String currentId = todo.getId();
+            for (TodoItem t : todos) {
+                if (t == null || t.getId() == null) continue;
+                if (t.getId().equals(currentId)) continue;
+                if (t.getStatus() != TodoStatus.COMPLETED) continue;
+                String tDesc = t.getDescription() == null ? "" : t.getDescription();
+                String tResult = t.getResult() == null ? "" : t.getResult();
+                if (tResult.isBlank() && tDesc.isBlank()) continue;
+                stepIdx++;
+                userPromptBuf.append("[步骤 ").append(stepIdx).append("] ").append(tDesc).append("\n");
+                if (!tResult.isBlank()) {
+                    String snippet = tResult.length() > 500 ? tResult.substring(0, 500) + "..." : tResult;
+                    userPromptBuf.append("产出摘要: ").append(snippet).append("\n\n");
+                } else {
+                    userPromptBuf.append("\n");
+                }
+            }
+        }
+        userPromptBuf.append("\n请直接输出面向用户的回复正文：");
+
+        List<ChatMessage> messages = List.of(
+                SystemMessage.from(systemPrompt),
+                UserMessage.from(userPromptBuf.toString())
+        );
+
+        String rawText = null;
+        try {
+            if (streamingChatModel != null) {
+                rawText = callLlmStreamingForReplyText(messages, todo, state);
+            } else {
+                rawText = callLlmSyncForPlainText(messages);
+            }
+        } catch (Exception e) {
+            log.warn("ToolNode: reply_text 纯文本直出 LLM 调用失败，降级到 function-calling 决策: {}", e.getMessage());
+            return null;
+        }
+        if (rawText == null || rawText.isBlank()) {
+            log.warn("ToolNode: reply_text 纯文本直出 LLM 返回空，降级到 function-calling 决策");
+            return null;
+        }
+
+        Map<String, Object> args = new HashMap<>();
+        args.put("content", rawText);
+        // 推断 replyType（粗粒度，ReplyTextTool 自带兜底为 EXPLANATION）
+        String lowerDesc = (todo.getDescription() == null ? "" : todo.getDescription().toLowerCase());
+        if (lowerDesc.contains("总结") || lowerDesc.contains("汇总") || lowerDesc.contains("summary")) {
+            args.put("replyType", "SUMMARY");
+        } else if (lowerDesc.contains("问候") || lowerDesc.contains("打招呼")) {
+            args.put("replyType", "GREETING");
+        } else if (lowerDesc.contains("澄清") || lowerDesc.contains("确认")) {
+            args.put("replyType", "CLARIFY");
+        }
+        String sessionId = state.sessionId();
+        if (sessionId != null && !sessionId.isBlank()) {
+            args.put("sessionId", sessionId);
+        }
+        args.put("todo_description", todo.getDescription());
+        args.put("instructions", state.instructions());
+
+        try {
+            Object result = replyTool.execute(args);
+            LlmDecisionOutcome o = new LlmDecisionOutcome();
+            o.chosen = replyTool;
+            o.args = args;
+            if (result instanceof Map<?, ?> resultMap) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> typedMap = (Map<String, Object>) resultMap;
+                o.toolResultOverride = typedMap;
+            }
+            return o;
+        } catch (Exception e) {
+            log.error("ToolNode: reply_text 纯文本直出执行失败: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * reply_text 纯文本直出的流式调用：复用 SSE 推送通道（CODE_STREAMING 事件，前端覆盖式渲染）。
+     * <p>与 callLlmStreamingForPlainText 区别：本方法不要求 LLM 输出 artifact/HTML，
+     * 直接把流式 token 作为回复正文累积。</p>
+     */
+    private String callLlmStreamingForReplyText(List<ChatMessage> messages, TodoItem todo, DeepAgentState state) {
+        final java.util.function.Consumer<com.hypersense.boot.framework.agents.model.AgentEvent> eventConsumer =
+                com.hypersense.boot.framework.agents.engine.SubAgentEventBus.get();
+        final StringBuilder accumulator = new StringBuilder();
+        final long[] lastEmitTime = {0};
+        final String streamSessionId = state.sessionId();
+        final String streamTodoId = todo.getId();
+        final String streamTodoDesc = todo.getDescription();
+
+        dev.langchain4j.model.chat.request.ChatRequest req = dev.langchain4j.model.chat.request.ChatRequest.builder()
+                .messages(messages)
+                .maxOutputTokens(LLM_MAX_OUTPUT_TOKENS)
+                .build();
+
+        java.util.concurrent.CompletableFuture<ChatResponse> future = new java.util.concurrent.CompletableFuture<>();
+        streamingChatModel.chat(req, new dev.langchain4j.model.chat.response.StreamingChatResponseHandler() {
+            @Override
+            public void onPartialResponse(String partialResponse) {
+                // 复用 emitCodeStreaming：前端按 accumulated 覆盖渲染（MessageMarkdown）
+                emitCodeStreaming(eventConsumer, accumulator, lastEmitTime,
+                        streamTodoId, streamTodoDesc, streamSessionId, partialResponse);
+            }
+
+            @Override
+            public void onCompleteResponse(ChatResponse completeResponse) {
+                future.complete(completeResponse);
+            }
+
+            @Override
+            public void onError(Throwable error) {
+                future.completeExceptionally(error);
+            }
+        });
+
+        ChatResponse resp;
+        try {
+            resp = future.get(10, java.util.concurrent.TimeUnit.MINUTES);
+        } catch (Exception e) {
+            future.cancel(true);
+            log.warn("ToolNode: reply_text 流式调用失败: {}", e.getMessage());
+            return null;
+        }
+        // reply_text 不读 tool args，主文本即回复正文
+        return resp.aiMessage().text();
     }
 
     // ========== 重试逻辑 ==========
@@ -1487,25 +2290,58 @@ public class ToolNode implements NodeAction<DeepAgentState> {
     private void rescueContentFromText(String toolName, Map<String, Object> args, String llmText) {
         if (llmText == null || llmText.isBlank()) return;
         if (args == null) return;
-        // 仅对需要 content 的工具兜底
-        if (!"file_write".equals(toolName) && !"reply_text".equals(toolName)) return;
+        // 仅对需要 content 的工具兜底（file_write_chunk 与 file_write 走同一套提取逻辑）
+        boolean isFileWriteLike = "file_write".equals(toolName) || "file_write_chunk".equals(toolName);
+        if (!isFileWriteLike && !"reply_text".equals(toolName)) return;
 
         Object cur = args.get("content");
         if (cur != null && !cur.toString().isBlank()) return;  // 已有合法 content，不覆盖
 
-        // 第 0 步：剥除国产 LLM 常见的前言礼貌用语，截到首个 <!DOCTYPE 或 <html 标记处
-        String processed = llmText;
-        int doctypeIdx = processed.indexOf("<!DOCTYPE");
-        int htmlIdx = processed.indexOf("<html");
-        int cutIdx = -1;
-        if (doctypeIdx >= 0 && htmlIdx >= 0) cutIdx = Math.min(doctypeIdx, htmlIdx);
-        else if (doctypeIdx >= 0) cutIdx = doctypeIdx;
-        else if (htmlIdx >= 0) cutIdx = htmlIdx;
-        if (cutIdx > 0) {
-            processed = processed.substring(cutIdx);
-        }
-        String text = processed.trim();
+        String text = llmText.trim();
         String rescued = null;
+
+        // 0. 【artifact 优先解析】open-design 模式：LLM 用 <artifact path="xxx.html">...</artifact>
+        // 包裹完整 HTML，规避 JSON 转义与 function-call token 上限——这是 design profile 的主路径
+        // 容错：path/name/identifier 三个属性名都接受，兼容 LLM 变体命名
+        // 仅对 file_write 类工具生效：reply_text 是纯对话回复，不应被 artifact 劫持（否则会把
+        // LLM 偶然输出的 artifact 标签内容塞进回复气泡，污染对话流）
+        if (isFileWriteLike) {
+        java.util.regex.Matcher artifact = java.util.regex.Pattern.compile(
+                "<artifact\\s+(?:path|name|identifier)\\s*=\\s*[\"']([^\"']+)[\"']\\s*>\\s*([\\s\\S]*?)</artifact>",
+                java.util.regex.Pattern.CASE_INSENSITIVE
+        ).matcher(text);
+        if (artifact.find()) {
+            String pathVal = artifact.group(1).trim();
+            String contentVal = artifact.group(2).trim();
+            if (!contentVal.isBlank()) {
+                rescued = contentVal;
+                // 若 args 没有 filename，从 path 推导（取 basename）
+                Object curFn = args.get("filename");
+                if ((curFn == null || curFn.toString().isBlank()) && !pathVal.isBlank()) {
+                    String basename = pathVal.replace('\\', '/');
+                    int slashIdx = basename.lastIndexOf('/');
+                    if (slashIdx >= 0) basename = basename.substring(slashIdx + 1);
+                    args.put("filename", basename);
+                    log.info("ToolNode: artifact 兜底命中，从 path 属性推导 filename='{}'", basename);
+                }
+                log.info("ToolNode: artifact 兜底命中，提取 {} 字符（path={}）",
+                        rescued.length(), pathVal);
+            }
+        }
+        }  // end if (isFileWriteLike)
+
+        // 第 0.5 步：剥除国产 LLM 常见的前言礼貌用语，截到首个 <!DOCTYPE 或 <html 标记处（artifact 未命中时走老路径）
+        if (rescued == null) {
+            int doctypeIdx = text.indexOf("<!DOCTYPE");
+            int htmlIdx = text.indexOf("<html");
+            int cutIdx = -1;
+            if (doctypeIdx >= 0 && htmlIdx >= 0) cutIdx = Math.min(doctypeIdx, htmlIdx);
+            else if (doctypeIdx >= 0) cutIdx = doctypeIdx;
+            else if (htmlIdx >= 0) cutIdx = htmlIdx;
+            if (cutIdx > 0) {
+                text = text.substring(cutIdx).trim();
+            }
+        }
 
         // 1. 匹配 ```html ... ``` 或 ``` ... ``` 代码块（放宽：去掉换行强制要求，提高鲁棒性）
         java.util.regex.Matcher codeBlock = java.util.regex.Pattern.compile(
@@ -1525,7 +2361,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
             }
         }
         // 2.5 HTML 片段兜底：完整 <html>...</html>（不强求 DOCTYPE），需长度合理
-        if (rescued == null && "file_write".equals(toolName)) {
+        if (rescued == null && isFileWriteLike) {
             java.util.regex.Matcher htmlOnly = java.util.regex.Pattern.compile(
                     "(<html[\\s\\S]*?</html>)", java.util.regex.Pattern.CASE_INSENSITIVE
             ).matcher(text);
@@ -1542,7 +2378,7 @@ public class ToolNode implements NodeAction<DeepAgentState> {
             rescued = text.replaceAll("^\\s*(思考|reasoning|分析)[:：]?\\s*", "").trim();
         }
         // 4. file_write 兜底：若文本看起来是 HTML 片段（含 <html 或 <div 标签且较长）也接受
-        if (rescued == null && "file_write".equals(toolName)
+        if (rescued == null && isFileWriteLike
                 && text.length() >= 200
                 && (text.toLowerCase().contains("<html") || text.toLowerCase().contains("<div"))) {
             rescued = text;
@@ -1550,6 +2386,12 @@ public class ToolNode implements NodeAction<DeepAgentState> {
 
         if (rescued != null && !rescued.isBlank()) {
             args.put("content", rescued);
+            // file_write_chunk 工具契约读 chunk 字段（validateToolArgs 也校验 chunk），
+            // rescue 命中后必须同步填 chunk，否则下游 validateToolArgs 取 chunk 为 null → 误抛"参数缺失"
+            // → 触发不必要的纯文本回退（regression：function-call 路径文件生成中断）
+            if ("file_write_chunk".equals(toolName)) {
+                args.put("chunk", rescued);
+            }
             log.info("ToolNode: content 兜底命中，从 LLM 文本提取 {} 字符作为 {} 的 content",
                     rescued.length(), toolName);
         }
@@ -1557,11 +2399,28 @@ public class ToolNode implements NodeAction<DeepAgentState> {
 
     private void validateToolArgs(String toolName, Map<String, Object> args) {
         if (args == null) return;
-        if ("file_write".equals(toolName)) {
-            Object content = args.get("content");
+        // file_write_chunk 的单次写入模式（mode=write / mode=start 携带 chunk）走和 file_write 一致的 HTML 完整性校验
+        // 历史 bug：LLM 输出被截断在 </head> 处（CSS 过长 + maxOutputTokens 上限），
+        // 文件落盘成功但渲染黑屏——必须在校验层拦截，让 LLM 收到清晰错误反馈
+        boolean isFileWrite = "file_write".equals(toolName);
+        boolean isFileWriteChunkSingleShot = false;
+        if ("file_write_chunk".equals(toolName)) {
+            String mode = args.get("mode") == null ? "write" : args.get("mode").toString().toLowerCase();
+            Object chunk = args.get("chunk");
+            // mode=write 或 mode=start 携带 chunk（自动落盘）时启用 HTML 校验；
+            // mode=append/end 不校验（缓冲阶段无完整内容）
+            if (("write".equals(mode) && chunk != null && !chunk.toString().isBlank())
+                    || ("start".equals(mode) && chunk != null && !chunk.toString().isBlank())) {
+                isFileWriteChunkSingleShot = true;
+            }
+        }
+        if (isFileWrite || isFileWriteChunkSingleShot) {
+            // file_write 用 content 字段；file_write_chunk 用 chunk 字段
+            Object content = isFileWrite ? args.get("content") : args.get("chunk");
+            String cnLabel = isFileWrite ? "file_write content" : "file_write_chunk chunk";
             if (content == null || content.toString().isBlank()) {
                 throw new com.hypersense.boot.common.exception.BusinessException(
-                    "file_write content 参数缺失或为空。必须提供完整文件内容（HTML/CSS/JS 全部代码）。" +
+                    cnLabel + " 参数缺失或为空。必须提供完整文件内容（HTML/CSS/JS 全部代码）。" +
                     "常见原因：1) 输出被 maxOutputTokens 截断，请确保 content 字段一次性写入完整源码；" +
                     "2) 把内容放到了思考文本里而非工具参数中，请直接放入 content 参数；" +
                     "3) 调用了 file_write 但没有传任何 arguments，请重新调用并附上完整的 content 字段。");
@@ -1578,19 +2437,22 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                 // 1. 最小长度校验：HTML 文件至少 500 字符（<!DOCTYPE> + <html> + <head> + <body> 最小骨架约 200+）
                 if (c.length() < 500) {
                     throw new com.hypersense.boot.common.exception.BusinessException(
-                        "file_write content 长度异常（仅 " + c.length() + " 字符，HTML 至少需 500 字符）。" +
+                        cnLabel + " 长度异常（仅 " + c.length() + " 字符，HTML 至少需 500 字符）。" +
                         "content 必须是完整的 HTML 源码（含 <!DOCTYPE>、<html>、<head>、<body> 等），" +
                         "禁止使用 '...' 占位符或省略代码。请直接在 content 参数中写入完整 HTML 源码。");
                 }
-                // 2. 占位符检测（不限长度）：含 ... / … / 省略 / 原有代码 等标记一律拒绝
-                if (c.contains("...") || c.contains("…") || c.contains("<原有代码>")
+                // 2. 占位符检测（不限长度）：检测代码省略信号。
+                // 注意：CJK 单字符省略号「…」(U+2026) 在合法 UI 文案中常见（如「加载中…」「更多…」），
+                // 不应触发回退；仅检测结构性省略短语（中文化码注释 / 三点代码占位）。
+                if (c.contains("...") || c.contains("<原有代码>")
                         || c.contains("省略代码") || c.contains("代码省略") || c.contains("原有代码")
                         || c.contains("<!-- 代码省略") || c.contains("<!--省略") || c.contains("原代码")
                         || c.contains("<!-- 此处省略")) {
                     throw new com.hypersense.boot.common.exception.BusinessException(
-                        "file_write content 含占位符（'...' / '省略' / '原有代码'），必须提供完整 HTML 源码，禁止省略任何部分。");
+                        cnLabel + " 含占位符（'...' / '省略' / '原有代码'），必须提供完整 HTML 源码，禁止省略任何部分。");
                 }
                 // 3. HTML 结构完整性：必须同时含 <html>/<body> 开闭合标签（防止假 HTML 空壳）
+                //    生产 #12f/#12g：LLM 多次因 CSS 过长把 body 全部砍掉，停在 </head> 处，文件落盘但渲染黑屏
                 String lower = c.toLowerCase();
                 boolean hasHtmlOpen = lower.contains("<html");
                 boolean hasHtmlClose = lower.contains("</html>");
@@ -1598,13 +2460,16 @@ public class ToolNode implements NodeAction<DeepAgentState> {
                 boolean hasBodyClose = lower.contains("</body>");
                 if (!hasHtmlOpen || !hasHtmlClose || !hasBodyOpen || !hasBodyClose) {
                     throw new com.hypersense.boot.common.exception.BusinessException(
-                        "file_write content HTML 结构不完整（必须同时含 <html>/<head>/<body> 开闭合标签）。" +
+                        cnLabel + " HTML 结构不完整（必须同时含 <html>/<head>/<body> 开闭合标签）。" +
                         "缺失: " +
                         (!hasHtmlOpen ? "<html " : "") +
                         (!hasHtmlClose ? "</html> " : "") +
                         (!hasBodyOpen ? "<body " : "") +
                         (!hasBodyClose ? "</body>" : "") +
-                        "。必须提供完整 HTML 文档结构。");
+                        "。常见原因：CSS 过长导致输出被截断在 </head> 处。" +
+                        "解决：1) 砍掉冗余 design token 系统（直接写 color:#xxx 而非 var(--xxx)）；" +
+                        "2) 砍 section 数量（保留 3-4 个核心 section）而非砍 body；" +
+                        "3) CSS 控制在 200 行内，整体 HTML 控制在 6K tokens 内。");
                 }
             } else {
                 // 非 HTML 文件：保留原有占位符检测（仅 < 200 字符时触发）

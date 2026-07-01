@@ -11,6 +11,18 @@ import java.util.regex.Pattern;
  * <p>AI 默认调色板常漂移到 Tailwind 红/蓝/紫（#dc2626、#3b82f6、#8b5cf6 等），
  * 与品牌主色冲突。本规则扫描输入中的 #RRGGBB，跳过黑白灰中性色，对其余颜色
  * 计算与品牌色的 RGB 欧氏距离（归一化到 0-100%），超容差即报错。</p>
+ *
+ * <h3>无品牌色语义（设计决策）</h3>
+ * <p>当 {@code brandHex} 为 {@code null} 或解析失败时，本规则<b>静默放行</b>（check 直接返回 null）。
+ * 这是有意为之：</p>
+ * <ul>
+ *   <li>「无品牌色」与「禁止彩色」语义不同 —— 强行限制会让无品牌 PPT 退化为单色排版，
+ *       反而误伤正常设计（如 rainbow dashboard、illustration-heavy deck）。</li>
+ *   <li>主色偏移检测只在「品牌主色存在」这一前提下成立，缺主色时 slop 拦截由
+ *       {@link NoPurpleGradientRule} 等其他规则覆盖。</li>
+ * </ul>
+ * <p>如未来需要对无品牌色 PPT 强加「禁止高饱和」兜底，应新增独立 lint 规则（如
+ * {@code no_extreme_saturation}）而非扩展本规则 —— 单一职责。</p>
  */
 public class BrandColorDriftRule implements LintRule {
 

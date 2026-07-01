@@ -276,14 +276,16 @@ public class ExecuteNode implements NodeAction<DeepAgentState> {
         String activeProfileId = state.<String>value(com.hypersense.boot.framework.agents.model.DeepAgentState.ACTIVE_PROFILE).orElse(null);
         if (activeProfileId == null || activeProfileId.isBlank()) return "";
         try {
-            com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId);
+            String sessionId = state.<String>value(DeepAgentState.SESSION_ID).orElse(null);
+            java.util.Map<String, Object> hints = state.<java.util.Map<String, Object>>value(DeepAgentState.PROFILE_HINTS).orElse(java.util.Map.of());
+            com.hypersense.boot.framework.agents.profile.CapabilityProfile profile = profileRegistry.get(activeProfileId, sessionId, hints);
             return switch (profile.planStrategy()) {
                 case OUTLINE_DEMO -> "\n【拆分策略】先输出 outline + 1 个 demo 项，待用户审批后再批量输出剩余 TODO。\n";
                 case TDD -> {
                     StringBuilder sb = new StringBuilder("\n【拆分策略】TODO 顺序：(1) file_read 相关代码 (2) file_write 失败测试 (3) 等待用户审批测试方向 (4) file_write 实现 (5) sandbox_exec 测试 (6) lint。\n");
-                    String sessionId = state.<String>value(DeepAgentState.SESSION_ID).orElse("__default__");
+                    String tddSessionId = state.<String>value(DeepAgentState.SESSION_ID).orElse("__default__");
                     try {
-                        com.hypersense.boot.framework.agents.profile.impl.TddPhase cur = tddPhaseManager.current(sessionId);
+                        com.hypersense.boot.framework.agents.profile.impl.TddPhase cur = tddPhaseManager.current(tddSessionId);
                         sb.append("当前 TDD 阶段：").append(cur.description())
                           .append("。本批 TODO 必须仅服务此阶段（不要跨阶段产出）。\n");
                     } catch (Exception ignore) { /* phase 不可用时静默，hint 仍有效 */ }

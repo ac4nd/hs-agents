@@ -165,21 +165,32 @@ public class FileRenderTool implements ToolProvider {
         List<String> produced = new ArrayList<>();
         List<String> slideFileNames = new ArrayList<>();
         int idx = 1;
+        long renderStartMs = System.currentTimeMillis();
+        log.info("file_render: 渲染开始 sessionId={}, template={}, slides={}, startTs={}",
+                effectiveSession, templateName, slides.size(), renderStartMs);
         try {
             for (JsonNode slide : slides) {
                 String fileName = "slide_" + idx + ".html";
+                long slideStartMs = System.currentTimeMillis();
                 // 单页 spec：复用整体 spec 但替换 slides 为单元素，避免模板遍历整副 deck
                 JsonNode singleSpec = wrapSingleSlide(specJson, slide);
                 String html = engine.render(templateName, singleSpec);
                 Files.writeString(outDir.resolve(fileName), html, StandardCharsets.UTF_8);
+                long slideElapsedMs = System.currentTimeMillis() - slideStartMs;
+                // 单页日志改 DEBUG：N 页 PPT 会产 N 条 INFO 噪音（10 页 = 10 条），汇总在末尾 INFO 即可
+                log.debug("file_render: 单页写入完成 sessionId={}, file={}, bytes={}, elapsedMs={}",
+                        effectiveSession, fileName, html.length(), slideElapsedMs);
                 slideFileNames.add(fileName);
                 produced.add(fileName);
                 idx++;
             }
 
             // deck 聚合页
+            long idxStartMs = System.currentTimeMillis();
             String indexHtml = engine.renderDeckIndex(specJson, slideFileNames);
             Files.writeString(outDir.resolve("index.html"), indexHtml, StandardCharsets.UTF_8);
+            log.info("file_render: 聚合页写入完成 sessionId={}, file=index.html, bytes={}, elapsedMs={}",
+                    effectiveSession, indexHtml.length(), System.currentTimeMillis() - idxStartMs);
             produced.add("index.html");
         } catch (Exception e) {
             log.error("file_render 渲染失败 sessionId={}, template={}", effectiveSession, templateName, e);
@@ -189,15 +200,18 @@ public class FileRenderTool implements ToolProvider {
             return partial;
         }
 
+        long totalElapsedMs = System.currentTimeMillis() - renderStartMs;
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("success", true);
         result.put("sessionId", effectiveSession);
         result.put("templateUsed", templateName);
         result.put("files", produced);
         result.put("outputDir", outDir.toString());
+        result.put("elapsedMs", totalElapsedMs);
         result.put("message", "渲染完成：" + slideFileNames.size() + " 页 + index.html");
-        log.info("file_render done: sessionId={}, template={}, slides={}",
-                effectiveSession, templateName, slideFileNames.size());
+        log.info("file_render done: sessionId={}, template={}, slides={}, totalElapsedMs={}, avgPerSlideMs={}",
+                effectiveSession, templateName, slideFileNames.size(), totalElapsedMs,
+                slideFileNames.isEmpty() ? 0 : (totalElapsedMs / slideFileNames.size()));
         return result;
     }
 

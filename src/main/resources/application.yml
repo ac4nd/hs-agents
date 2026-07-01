@@ -1,3 +1,11 @@
+server:
+  servlet:
+    # HTTP 请求/响应强制 UTF-8，防止中文乱码（Spring Boot 4 默认即 UTF-8，显式声明保险）
+    encoding:
+      charset: UTF-8
+      enabled: true
+      force: true
+
 spring:
   application:
     name: godlikeagents

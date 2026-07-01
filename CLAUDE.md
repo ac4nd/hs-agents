@@ -56,9 +56,15 @@
 1. IntentClassifier 识别为 design → 加载 DesignProfile
 2. `design_direction_explore` 产 3 份 outline → HITL 审批
 3. `design_asset_fetch` 取 logo + 真图
-4. LLM 输出 slides JSON（2-5K tokens，受 `maxOutputTokens` 限制）
-5. `file_render` 逐页渲染 + index.html 聚合页（3D 概览墙 + 键盘翻页）
-6. 反 slop lint 自检，不通过则重渲染（≤3 次）→ HITL
+4. **按产物类型分流**：
+   - **PPT / 幻灯片 deck** → LLM 输出 slides JSON（2-5K tokens）→ `file_render` 逐页渲染
+   - **Landing / 信息图 / 任意自由 HTML** → LLM 直接产 HTML → `file_write_chunk` 三阶段（start/append/end）落盘
+5. `file_render` 路径：逐页渲染 + index.html 聚合页（3D 概览墙 + 键盘翻页）
+6. 反 slop lint 自检，不通过则重渲染/重写（≤3 次）→ HITL
+
+> ⚠️ **工具选择铁律**：白名单**只有** `[design_asset_fetch, design_direction_explore, file_render, file_write_chunk, reply_text]`。
+> 严禁调用 `file_write`（不存在）——任何"保存 HTML 文件"需求走 `file_write_chunk`（自由 HTML）或 `file_render`（PPT 模板）。
+> systemPrompt §3.1 已写入决策树，LLM 选错时通常是因为 SQL 未应用最新版本（清缓存：`CapabilityProfileRegistry.invalidate("design")`）。
 
 #### 设计模式 lint 规则
 

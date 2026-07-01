@@ -51,6 +51,12 @@ public enum AgentEventType {
     CODE_STREAMING("code_streaming"),
     /** 工具调用错误（透传工具失败原因给前端） */
     TOOL_ERROR("tool_error"),
+    /**
+     * Lint 违规（Plan B/C：file_write/file_render 后扫描 profile.lintRules() 命中时推送）
+     * <p>data 字段：ruleId / description / message（违规说明）/ snippet（命中片段，已截断）/
+     * sessionId / toolName / attempt（本次会话累计违规次数）/ willInterrupt（是否即将触发 HITL）</p>
+     */
+    LINT_VIOLATION("lint_violation"),
     /** 审计警告（Finalize 输出含编造路径等违规内容时通知前端） */
     AUDIT_WARNING("audit_warning"),
     // ========== HITL 事件类型 ==========

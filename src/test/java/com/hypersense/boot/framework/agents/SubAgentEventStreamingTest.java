@@ -77,7 +77,9 @@ class SubAgentEventStreamingTest {
 
         String responseText;
         if (systemText.contains("任务规划专家")) {
-            responseText = "TODO: 回答用户问题";
+            // P3#11：PlanA「废除 direct 策略」要求 TODO 必须明确引用工具
+            // （reply_text / file_write / file_read / internet_search / sandbox / delegate）
+            responseText = "TODO: 使用 reply_text 工具回答用户问题";
         } else if (systemText.contains("任务执行决策器")) {
             // "tool" 策略 → 进入 ToolNode → TODO 标记 COMPLETED → 图终止
             responseText = "tool";

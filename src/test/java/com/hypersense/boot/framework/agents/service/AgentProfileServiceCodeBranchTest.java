@@ -53,4 +53,31 @@ class AgentProfileServiceCodeBranchTest {
         assertTrue(ids.contains("no_phantom_api"));
         assertTrue(ids.contains("comment_language_match"));
     }
+
+    /**
+     * P0#3：hints 透传测试。验证 hints 中的 language/sourceFile/testFile 能正常到达
+     * CodeProfile 构造路径而不抛异常。Hints=null（缺失）应回退 Python 默认值。
+     */
+    @Test
+    void shouldAcceptHintsForCodeProfile() {
+        AgentProfileEntity entity = new AgentProfileEntity();
+        entity.setProfileId("code");
+        entity.setName("代码模式");
+        entity.setSystemPrompt("你是工程师。{{userInput}}");
+        entity.setAllowedTools(new ObjectMapper().valueToTree(
+                List.of("file_read","file_write","sandbox_exec","package_lookup","reply_text")));
+        entity.setPlanStrategy("TDD");
+        when(mapper.findEnabledByProfileId("code")).thenReturn(entity);
+
+        // hints 提供非 Python 语言配置，CodeProfile 应正常构造（不抛异常）
+        java.util.Map<String, Object> hints = java.util.Map.of(
+                "language", "javascript",
+                "sourceFile", "src/index.js",
+                "testFile", "test/index.test.js");
+        CapabilityProfile profile = service.loadProfile("code", "s1", hints);
+
+        assertInstanceOf(CodeProfile.class, profile);
+        // 4 条 lint 规则应正常装配（compile_pass / test_pass 会用 JS 命令模板）
+        assertEquals(4, profile.lintRules().size());
+    }
 }

@@ -65,21 +65,25 @@ public class FileWriteChunkTool implements ToolProvider {
 
     @Override
     public String description() {
-        return "分块写入大文件（针对 8K+ tokens 的大 HTML）。"
-                + "调用流程：先 mode=start 初始化缓冲，再多次 mode=append 追加 chunk，"
-                + "最后 mode=end 一次性落盘。mode=start/end 时 chunk 可传空字符串。";
+        return "写入文件，支持两种模式："
+                + "(A) 单次写入 mode=write（推荐，适合 <8K tokens 的常规 HTML）：一次性传入完整内容直接落盘；"
+                + "(B) 分块写入（适合 8K+ tokens 大文件）：先 mode=start 初始化缓冲，"
+                + "再多次 mode=append 追加 chunk，最后 mode=end 一次性落盘。"
+                + "默认 mode=write；分块模式下 mode=start/end 时 chunk 可传空字符串。";
     }
 
     @Override
     public ToolSpecification specification() {
         return ToolSpecification.builder()
                 .name("file_write_chunk")
-                .description("分块写入大文件。mode=start 初始化、append 追加 chunk、end 落盘。适用于 8K+ tokens 的大 HTML。")
+                .description("写入文件。mode=write 单次落盘（默认，适合常规 HTML）；"
+                        + "或 mode=start/append/end 三阶段分块（适合 8K+ tokens 大文件）。")
                 .parameters(JsonObjectSchema.builder()
                         .addStringProperty("filename", "目标文件名（如 landing.html）；basename，禁止绝对路径/..")
-                        .addStringProperty("chunk", "本次 chunk 内容；mode=start/end 可传空字符串")
-                        .addStringProperty("mode", "模式：start | append | end")
-                        .required(List.of("filename", "mode"))
+                        .addStringProperty("chunk", "文件内容（mode=write 必填完整内容）；"
+                                + "mode=start/end 可传空字符串")
+                        .addStringProperty("mode", "模式：write（默认，单次）| start | append | end")
+                        .required(List.of("filename"))
                         .build())
                 .build();
     }
@@ -95,18 +99,40 @@ public class FileWriteChunkTool implements ToolProvider {
         String mode = pickString(params, "mode");
 
         if (filename == null || filename.isBlank()) {
-            return errorResult(sessionId, filename, "filename 缺失");
+            // 防御性兜底：LLM 漏传 filename 时从 chunk 的 <title> 推导，再不行用 output.html
+            // 历史观察：LLM 经常把完整 HTML 塞进 chunk 但忘了带 filename，硬拒绝会导致整轮产物丢失
+            String derived = deriveFilenameFromContent(chunk);
+            log.warn("file_write_chunk: filename 缺失，从内容推导为 '{}' sessionId={}", derived, sessionId);
+            filename = derived;
         }
         if (sessionId == null || sessionId.isBlank()) {
             sessionId = "default";
             log.debug("FileWriteChunkTool: sessionId 缺失，回退到 default 会话");
         }
         String safeName = sanitizeFilename(filename);
-        String normalizedMode = (mode == null || mode.isBlank()) ? "append" : mode.toLowerCase();
+        String normalizedMode = (mode == null || mode.isBlank()) ? "write" : mode.toLowerCase();
 
         try {
             switch (normalizedMode) {
+                case "write" -> {
+                    // 单次写入模式：LLM 一次性传完整内容，直接落盘，无需 start/append/end
+                    if (chunk == null || chunk.isBlank()) {
+                        return errorResult(sessionId, safeName,
+                                "write 模式要求 chunk 非空（如需分块请用 start/append/end）");
+                    }
+                    Map<String, Object> writeResult = persist(sessionId, safeName, chunk);
+                    log.info("file_write_chunk write(single-shot): sessionId={}, file={}, bytes={}, success={}",
+                            sessionId, safeName, chunk.length(), writeResult.get("success"));
+                    return writeResult;
+                }
                 case "start" -> {
+                    // 防御性兜底：LLM 把完整 HTML 塞进 start 又没继续 append/end 时，直接当 write 落盘
+                    if (chunk != null && !chunk.isBlank()) {
+                        log.warn("file_write_chunk: start 携带 {} 字符内容，自动按 write 落盘 sessionId={}, file={}",
+                                chunk.length(), sessionId, safeName);
+                        Map<String, Object> writeResult = persist(sessionId, safeName, chunk);
+                        return writeResult;
+                    }
                     buffer.start(sessionId, safeName);
                     log.info("file_write_chunk start: sessionId={}, file={}", sessionId, safeName);
                     Map<String, Object> result = new LinkedHashMap<>();
@@ -185,15 +211,26 @@ public class FileWriteChunkTool implements ToolProvider {
 
         try {
             Sandbox sandbox = sandboxManager.getOrCreate(sessionId);
+            long startMs = System.currentTimeMillis();
+            log.info("file_write_chunk: 写入开始 sessionId={}, file={}, bytes={}, startTs={}",
+                    sessionId, filename, content.length(), startMs);
             SandboxResult result = sandbox.writeFile(sandboxPath, content);
+            long elapsedMs = System.currentTimeMillis() - startMs;
             if (result.isSuccess()) {
                 base.put("success", true);
                 base.put("status", "written");
+                base.put("elapsedMs", elapsedMs);
                 base.put("message", "内容已写入工作空间: " + workspacePath);
+                log.info("file_write_chunk: 写入完成 sessionId={}, file={}, bytes={}, elapsedMs={}, throughput={}KB/s",
+                        sessionId, filename, content.length(), elapsedMs,
+                        elapsedMs > 0 ? (content.length() / 1024.0 / (elapsedMs / 1000.0)) : -1);
             } else {
                 base.put("success", false);
+                base.put("elapsedMs", elapsedMs);
                 base.put("message", "沙箱写入失败: " + workspacePath);
                 base.put("error", result.getError() != null ? result.getError() : "未知错误");
+                log.warn("file_write_chunk: 写入失败 sessionId={}, file={}, elapsedMs={}, err={}",
+                        sessionId, filename, elapsedMs, base.get("error"));
             }
         } catch (Exception e) {
             base.put("success", false);
@@ -202,6 +239,29 @@ public class FileWriteChunkTool implements ToolProvider {
             log.error("file_write_chunk: 沙箱调用异常 sessionId={}, path={}", sessionId, sandboxPath, e);
         }
         return base;
+    }
+
+    /**
+     * filename 缺失时的防御性推导：优先从 HTML {@code <title>} 抽取并 slugify，
+     * 失败回退 {@code output.html}。绝不硬拒绝，避免整轮产物丢失。
+     */
+    private String deriveFilenameFromContent(String chunk) {
+        if (chunk != null) {
+            int titleIdx = chunk.indexOf("<title>");
+            if (titleIdx >= 0) {
+                int end = chunk.indexOf("</title>", titleIdx);
+                if (end > titleIdx) {
+                    String title = chunk.substring(titleIdx + 7, end).trim();
+                    String slug = title.toLowerCase()
+                            .replaceAll("[^a-z0-9\\u4e00-\\u9fa5]+", "-")
+                            .replaceAll("^-+|-+$", "");
+                    if (!slug.isBlank()) {
+                        return slug + ".html";
+                    }
+                }
+            }
+        }
+        return "output.html";
     }
 
     /**

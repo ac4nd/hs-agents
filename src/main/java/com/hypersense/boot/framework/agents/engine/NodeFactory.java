@@ -46,6 +46,7 @@ public class NodeFactory {
     private final com.hypersense.boot.framework.agents.profile.CapabilityProfileRegistry profileRegistry;
     private final com.hypersense.boot.framework.agents.profile.impl.TddPhaseManager tddPhaseManager;
     private final com.hypersense.boot.framework.agents.profile.lint.SymbolRegistry symbolRegistry;
+    private final com.hypersense.boot.framework.agents.profile.lint.LintStatsManager lintStatsManager;
 
     public PlanNode planNode(ChatModel chatModel) {
         return new PlanNode(chatModel, hitlGateChecker, agentProperties, attachmentContext, profileRegistry);
@@ -70,6 +71,7 @@ public class NodeFactory {
      */
     public ToolNode toolNode(ChatModel chatModel, @Nullable StreamingChatModel streamingChatModel) {
         ToolRetryConfig retryConfig = ToolRetryConfig.fromProperties(agentProperties.getTools().getToolRetry());
-        return ToolNode.create(toolProviders, retryConfig, chatModel, streamingChatModel, profileRegistry);
+        return ToolNode.create(toolProviders, retryConfig, chatModel, streamingChatModel,
+                profileRegistry, tddPhaseManager, symbolRegistry, lintStatsManager);
     }
 }

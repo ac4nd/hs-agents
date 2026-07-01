@@ -49,6 +49,27 @@ class TddPhaseManagerTest {
         assertTrue(m.shouldInterruptForHITL());
     }
 
+    /**
+     * P1#5：第 3 次失败时 phase 必须停在 LINT 等待 HITL，
+     * 不再自动切回 IMPL（否则 retry 预算耗不尽，HITL 永远触发不了）。
+     */
+    @Test
+    void shouldHaltAtLintOnThirdFailure() {
+        TddPhaseManager m = new TddPhaseManager();
+        moveToLint(m);
+
+        m.failLint();
+        m.transition(TddPhase.EXEC);
+        m.transition(TddPhase.LINT);
+        m.failLint();
+        m.transition(TddPhase.EXEC);
+        m.transition(TddPhase.LINT);
+
+        m.failLint(); // 第 3 次失败
+        assertEquals(TddPhase.LINT, m.current(), "第 3 次失败后必须停在 LINT 等待 HITL");
+        assertTrue(m.shouldInterruptForHITL());
+    }
+
     @Test
     void shouldRejectInvalidTransitions() {
         TddPhaseManager m = new TddPhaseManager();

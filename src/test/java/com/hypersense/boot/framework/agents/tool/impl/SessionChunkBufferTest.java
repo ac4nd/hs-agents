@@ -3,10 +3,10 @@ package com.hypersense.boot.framework.agents.tool.impl;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 /**
- * {@link SessionChunkBuffer} 单元测试：start/append/end 序列、跨会话隔离、非法状态异常。
+ * {@link SessionChunkBuffer} 单元测试：start/append/end 序列、跨会话隔离、容错降级。
  *
  * @author Claude
  * @since 2026/6/29
@@ -37,14 +37,18 @@ class SessionChunkBufferTest {
     }
 
     @Test
-    void shouldThrowWhenAppendWithoutStart() {
+    void shouldAutoStartOnAppendWithoutStart() {
+        // 容错：LLM 漏调 start 时 append 自动初始化缓冲区，不丢内容
         SessionChunkBuffer buf = new SessionChunkBuffer();
-        assertThrows(IllegalStateException.class, () -> buf.append("s1", "x.html", "data"));
+        buf.append("s1", "x.html", "data");
+        assertEquals(4, buf.bufferSize("s1", "x.html"));
+        assertEquals("data", buf.end("s1", "x.html"));
     }
 
     @Test
-    void shouldThrowWhenEndWithoutStart() {
+    void shouldReturnNullWhenEndWithoutStart() {
+        // 容错：未 start 直接 end 不再抛异常，返回 null 由调用方降级
         SessionChunkBuffer buf = new SessionChunkBuffer();
-        assertThrows(IllegalStateException.class, () -> buf.end("s1", "x.html"));
+        assertNull(buf.end("s1", "x.html"));
     }
 }
